@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Data files (student records — do not commit)
+core/data/*.xlsx
+core/data/*.csv
+
+# macOS
+.DS_Store
+
+# Debian package (large binary)
+*.deb
