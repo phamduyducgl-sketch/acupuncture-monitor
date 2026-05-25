@@ -14,9 +14,12 @@
   <!-- ── Header ── -->
   <header>
     <h1>Acupuncture Monitor</h1>
-    <div id="status-bar">
-      <span id="cv-status" class="badge badge-warn">⏳ OpenCV</span>
-      <span id="cam-status" class="badge">📷 Tắt</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <button id="btn-theme" class="btn-icon">Sáng</button>
+      <div id="status-bar">
+        <span id="cv-status" class="badge badge-warn">⏳ OpenCV</span>
+        <span id="cam-status" class="badge">📷 Tắt</span>
+      </div>
     </div>
   </header>
 
@@ -99,6 +102,11 @@
     <button id="btn-export" class="btn btn-export">⬇ TẢI FILE CSV</button>
   </div>
 
+  <!-- ── Chart ── -->
+  <div class="cam-ctrl" style="padding-top:0">
+    <button id="btn-chart" class="btn btn-chart">BIỂU ĐỒ HỌC TẬP</button>
+  </div>
+
   <!-- ── Settings toggle ── -->
   <div class="cam-ctrl" style="padding-top:0">
     <button id="btn-settings" class="btn btn-settings">⚙ CÀI ĐẶT</button>
@@ -127,6 +135,25 @@
     <button id="btn-apply" class="btn btn-apply">ÁP DỤNG</button>
     <span id="apply-msg" class="hint" style="margin-top:4px"></span>
   </section>
+
+  <!-- ── Chart modal ── -->
+  <div id="chart-modal" class="chart-modal" style="display:none">
+    <div class="chart-inner">
+      <div class="chart-topbar">
+        <span id="chart-title" class="chart-title">Đường cong học tập</span>
+        <button id="btn-chart-close" class="btn-icon">✕</button>
+      </div>
+      <div class="chart-tabs" id="chart-tabs">
+        <button class="ctab active" data-idx="2" data-unit="cm">Chiều dài</button>
+        <button class="ctab" data-idx="0" data-unit="cm/s">Vận tốc</button>
+        <button class="ctab" data-idx="1" data-unit="độ">Góc châm</button>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="lc-canvas"></canvas>
+      </div>
+      <div id="chart-info" class="chart-info"></div>
+    </div>
+  </div>
 
   <!-- ── Scripts (order matters) ── -->
   <!--

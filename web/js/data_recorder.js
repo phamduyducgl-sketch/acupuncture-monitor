@@ -34,6 +34,9 @@ class DataRecorder {
 
   get studentId() { return this._studentId; }
 
+  /** Trả về bản sao danh sách lần đo: [[velocity, angle, length], ...] */
+  getRecords() { return this._records.map(r => [...r]); }
+
   /**
    * Tải file CSV về thiết bị.
    * Tên file: MSSV_YYYY-MM-DD.csv

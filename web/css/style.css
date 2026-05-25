@@ -196,3 +196,84 @@ header h1 { font-size: 1rem; font-weight: 600; color: #e6edf3; }
   width: 100%; background: var(--blue); color: #fff;
   padding: 11px; font-size: .9rem; margin-top: 4px;
 }
+
+/* ── Theme button ── */
+.btn-icon {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: .78rem;
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn-icon:active { filter: brightness(.75); }
+
+/* ── Chart button ── */
+.btn-chart {
+  background: #21262d; color: var(--accent);
+  width: 100%; padding: 12px;
+  border: 1px solid var(--border); font-size: .9rem;
+}
+
+/* ── Chart modal ── */
+.chart-modal {
+  position: fixed; inset: 0; z-index: 200;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+.chart-inner {
+  padding: 14px 12px 24px;
+  display: flex; flex-direction: column;
+  gap: 12px;
+}
+.chart-topbar {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.chart-title { font-size: .95rem; font-weight: 600; color: var(--text); }
+.chart-tabs  { display: flex; gap: 6px; }
+.ctab {
+  flex: 1; padding: 8px 4px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--muted);
+  font-size: .8rem; font-weight: 600; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ctab.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+.chart-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px;
+  height: 300px; position: relative;
+}
+.chart-info {
+  font-size: .78rem; color: var(--muted);
+  text-align: center; padding: 0 4px;
+}
+
+/* ── Light theme ── */
+[data-theme="light"] {
+  --bg:       #ffffff;
+  --surface:  #f6f8fa;
+  --border:   #d0d7de;
+  --text:     #24292f;
+  --muted:    #57606a;
+  --blue:     #0969da;
+  --green:    #1a7f37;
+  --yellow:   #9a6700;
+  --yellow-bg:#fff8c5;
+  --red:      #cf222e;
+  --accent:   #0969da;
+}
+[data-theme="light"] .badge-ok  { background: #dafbe1; color: #1a7f37; }
+[data-theme="light"] .badge-warn { color: #9a6700; }
+[data-theme="light"] .badge-cam { background: #ddf4ff; color: #0969da; }
+[data-theme="light"] .metric.highlight { background: #dafbe1; border-color: #1a7f37; }
+[data-theme="light"] .btn-cam    { background: #f6f8fa; }
+[data-theme="light"] .btn-export { background: #f6f8fa; }
+[data-theme="light"] .btn-settings { background: #f6f8fa; }
+[data-theme="light"] .btn-chart  { background: #f6f8fa; }
+[data-theme="light"] .m-val      { color: #bc4c00; }
+[data-theme="light"] .cam-placeholder { color: #8c959f; }

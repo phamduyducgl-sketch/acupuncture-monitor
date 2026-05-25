@@ -186,8 +186,12 @@ btnDisplay.addEventListener('click', () => {
   );
   renderSnapshot(snap);
 
-  try { recorder.record(snap.avgVelocity, snap.angleDeg, snap.lengthCm); }
-  catch (_) { /* session chưa tạo — bỏ qua */ }
+  try {
+    recorder.record(snap.avgVelocity, snap.angleDeg, snap.lengthCm);
+  } catch (_) {
+    saveMsg.style.color = '#e3b341';
+    saveMsg.textContent = '⚠ Chưa lưu MSSV — kết quả không được ghi.';
+  }
 
   // Reset trạng thái SET
   isSet = false;
@@ -257,6 +261,159 @@ btnSettings.addEventListener('click', () => {
   settingsPanel.style.display = open ? 'block' : 'none';
   btnSettings.classList.toggle('open', open);
 });
+
+// ── Theme toggle ──────────────────────────────────────────────────────────────
+const btnTheme = document.getElementById('btn-theme');
+
+function applyTheme(theme) {
+  if (theme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    btnTheme.textContent = 'Tối';
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    btnTheme.textContent = 'Sáng';
+  }
+  btnTheme.dataset.current = theme;
+}
+
+(function initTheme() {
+  const saved = localStorage.getItem('acupTheme');
+  const systemLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+  applyTheme(saved || (systemLight ? 'light' : 'dark'));
+})();
+
+btnTheme.addEventListener('click', () => {
+  const next = btnTheme.dataset.current === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  localStorage.setItem('acupTheme', next);
+  if (lcChart) {
+    const tab = document.querySelector('.ctab.active');
+    if (tab) renderChart(parseInt(tab.dataset.idx, 10), tab.dataset.unit);
+  }
+});
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+let lcChart = null;
+const chartModal = document.getElementById('chart-modal');
+
+async function loadChartJs() {
+  if (window.Chart) return;
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js';
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}
+
+document.getElementById('btn-chart').addEventListener('click', async () => {
+  if (!recorder.studentId || recorder.count === 0) {
+    alert('Chưa có dữ liệu. Nhập MSSV, thực hiện châm kim và nhấn HIỂN THỊ KQ trước.');
+    return;
+  }
+  document.getElementById('chart-title').textContent =
+    `Đường cong học tập — ${recorder.studentId}`;
+  chartModal.style.display = 'flex';
+  await loadChartJs();
+  const tab = document.querySelector('.ctab.active');
+  renderChart(parseInt(tab.dataset.idx, 10), tab.dataset.unit);
+});
+
+document.getElementById('btn-chart-close').addEventListener('click', () => {
+  chartModal.style.display = 'none';
+});
+
+document.getElementById('chart-tabs').addEventListener('click', e => {
+  const tab = e.target.closest('.ctab');
+  if (!tab || !window.Chart) return;
+  document.querySelectorAll('.ctab').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  renderChart(parseInt(tab.dataset.idx, 10), tab.dataset.unit);
+});
+
+function movingAvg(arr, w) {
+  return arr.map((_, i) => {
+    const s  = Math.max(0, i - Math.floor(w / 2));
+    const e  = Math.min(arr.length, i + Math.ceil(w / 2));
+    const sl = arr.slice(s, e);
+    return sl.reduce((a, b) => a + b, 0) / sl.length;
+  });
+}
+
+function renderChart(metricIdx, unit) {
+  const records = recorder.getRecords();
+  const n = records.length;
+  if (n === 0) return;
+
+  const yVals  = records.map(r => r[metricIdx]);
+  const raw    = yVals.map((y, i) => ({ x: i + 1, y }));
+  const w      = Math.min(15, Math.max(3, Math.round(n / 8)));
+  const maVals = movingAvg(yVals, w);
+  const maData = maVals.map((y, i) => ({ x: i + 1, y: Math.round(y * 100) / 100 }));
+
+  const mean = Math.round(yVals.reduce((a, b) => a + b, 0) / n * 100) / 100;
+  const std  = Math.round(
+    Math.sqrt(yVals.reduce((a, b) => a + (b - mean) ** 2, 0) / n) * 100
+  ) / 100;
+
+  const isDark    = document.documentElement.getAttribute('data-theme') !== 'light';
+  const dotColor  = isDark ? 'rgba(201,209,217,0.5)'  : 'rgba(0,0,0,0.45)';
+  const lineColor = isDark ? '#58a6ff' : '#0969da';
+  const dashColor = isDark ? 'rgba(88,166,255,0.45)'  : 'rgba(9,105,218,0.4)';
+  const axisColor = isDark ? '#8b949e' : '#57606a';
+  const gridColor = isDark ? 'rgba(48,54,61,0.9)'     : 'rgba(208,215,222,0.6)';
+
+  const canvas = document.getElementById('lc-canvas');
+  if (lcChart) { lcChart.destroy(); lcChart = null; }
+
+  lcChart = new Chart(canvas, {
+    data: {
+      datasets: [
+        {
+          type: 'line', label: 'TB',
+          data: [{ x: 1, y: mean }, { x: n, y: mean }],
+          borderColor: dashColor, borderWidth: 1.5,
+          borderDash: [6, 4], pointRadius: 0, fill: false, order: 4,
+        },
+        {
+          type: 'line', label: 'Trung bình động',
+          data: maData,
+          borderColor: lineColor, borderWidth: 2.5,
+          tension: 0.4, pointRadius: 0, fill: false, order: 3,
+        },
+        {
+          type: 'scatter', label: 'Lần đo',
+          data: raw,
+          backgroundColor: dotColor,
+          pointRadius: 4.5, pointHoverRadius: 6, order: 1,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 250 },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => `${ctx.parsed.y} ${unit}` } },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: { display: true, text: 'Lần châm', color: axisColor, font: { size: 11 } },
+          grid: { color: gridColor }, ticks: { color: axisColor, maxTicksLimit: 8 },
+        },
+        y: {
+          title: { display: true, text: unit, color: axisColor, font: { size: 11 } },
+          grid: { color: gridColor }, ticks: { color: axisColor },
+        },
+      },
+    },
+  });
+
+  const names = ['Vận tốc', 'Góc châm', 'Chiều dài'];
+  document.getElementById('chart-info').textContent =
+    `${names[metricIdx]}: TB = ${mean} ${unit}   SD = ±${std} ${unit}   n = ${n} lần`;
+}
 
 btnApply.addEventListener('click', () => {
   const lh = parseInt(document.getElementById('hsv-lh').value, 10);
