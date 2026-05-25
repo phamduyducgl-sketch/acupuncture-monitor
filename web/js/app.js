@@ -107,37 +107,33 @@ function stopLoop() {
 function frameStep() {
   if (!streaming) return;
 
-  // Không xử lý nếu OpenCV chưa tải xong hoặc video chưa sẵn sàng
-  if (!opencvReady || video.readyState < 2) {
-    loopHandle = setTimeout(frameStep, 100);
-    return;
+  let delay = 35;
+  try {
+    if (!opencvReady || video.readyState < 2) {
+      delay = 100;
+    } else {
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width  = video.videoWidth  || 640;
+        canvas.height = video.videoHeight || 480;
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      lastResult = detector.detect(canvas);
+
+      if (lastResult.found) {
+        drawBBox(lastResult.vertices);
+        drawCenter(lastResult.center);
+        calculator.update(lastResult.center);
+        document.getElementById('val-angle').textContent = lastResult.angle;
+        noDetect.style.display = 'none';
+      } else {
+        noDetect.style.display = 'block';
+      }
+    }
+  } catch (e) {
+    console.error('frameStep error:', e);
+  } finally {
+    if (streaming) loopHandle = setTimeout(frameStep, delay);
   }
-
-  // Đảm bảo canvas đúng kích thước
-  if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-    canvas.width  = video.videoWidth  || 640;
-    canvas.height = video.videoHeight || 480;
-  }
-
-  // Bước 1: vẽ khung hình vào canvas
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-  // Bước 2: phát hiện kim (đọc pixel từ canvas → OpenCV.js)
-  lastResult = detector.detect(canvas);
-
-  // Bước 3: vẽ overlay bounding box lên canvas
-  if (lastResult.found) {
-    drawBBox(lastResult.vertices);
-    drawCenter(lastResult.center);
-    calculator.update(lastResult.center);
-    // Cập nhật góc live
-    document.getElementById('val-angle').textContent = lastResult.angle;
-    noDetect.style.display = 'none';
-  } else {
-    noDetect.style.display = 'block';
-  }
-
-  loopHandle = setTimeout(frameStep, 35);
 }
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
