@@ -39,7 +39,7 @@ class NeedleDetector {
   detect(canvas) {
     const result = {
       found: false, center: [0, 0],
-      angle: 0, radian: 0, area: 0, vertices: null
+      angle: 0, radian: 0, area: 0, vertices: null, incline: 90
     };
 
     // Mats tạm — được giải phóng trong finally
@@ -93,6 +93,7 @@ class NeedleDetector {
           result.angle    = ang;
           result.radian   = ang * Math.PI / 180;
           result.area     = area;
+          result.incline  = NeedleDetector._incline(rect);
           result.vertices = NeedleDetector._rectVertices(rect);
         }
         c.delete();
@@ -132,7 +133,7 @@ class NeedleDetector {
 
     this._invalidateMats();
 
-    this._kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+    if (!this._kernel) this._kernel = cv.Mat.ones(3, 3, cv.CV_8U);
 
     const [lh, ls, lv] = this.hsvLower;
     const [uh, us, uv] = this.hsvUpper;
@@ -157,6 +158,16 @@ class NeedleDetector {
    * cv.RotatedRect.points() không ổn định trên mọi phiên bản OpenCV.js,
    * nên tự tính bằng trigonometry.
    */
+  /**
+   * Góc (0–90°) giữa trục dài của hình chữ nhật và phương ngang của ảnh.
+   * Không phụ thuộc quy ước góc của từng phiên bản OpenCV.
+   */
+  static _incline({ size, angle }) {
+    const long = size.width >= size.height ? angle : angle + 90;
+    const a = ((long % 180) + 180) % 180;
+    return a > 90 ? 180 - a : a;
+  }
+
   static _rectVertices({ center, size, angle }) {
     const rad = angle * Math.PI / 180;
     const cos = Math.cos(rad), sin = Math.sin(rad);

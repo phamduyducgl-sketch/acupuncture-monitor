@@ -64,6 +64,38 @@ header h1 { font-size: 1rem; font-weight: 600; color: #e6edf3; }
   pointer-events: none;
 }
 .overlay-pill.set-ok { background: rgba(35,134,54,0.9); }
+.overlay-pill.tap-hint {
+  top: 10px; bottom: auto; white-space: nowrap;
+  background: rgba(31,111,235,0.92);
+}
+#canvas { touch-action: manipulation; cursor: crosshair; }
+
+/* ── View controls ── */
+.view-ctrl {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px 2px;
+}
+.view-ctrl input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.zoom-lbl {
+  font-size: 0.8rem; font-variant-numeric: tabular-nums;
+  min-width: 2.8em; text-align: right; color: var(--text);
+}
+.btn-mini {
+  padding: 8px 10px; font-size: 0.72rem; border-radius: 8px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); white-space: nowrap;
+}
+.btn-mini.on { border-color: var(--accent); color: var(--accent); }
+.view-hint, .cam-info {
+  font-size: 0.72rem; color: var(--muted); line-height: 1.45;
+}
+.view-hint { padding: 2px 12px 4px; }
+.cam-info  { margin: 2px 0 6px; }
+.cam-select {
+  flex: 1; min-width: 0; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px; font-size: 0.85rem;
+}
 
 .cam-placeholder {
   position: absolute; inset: 0;

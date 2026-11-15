@@ -32,6 +32,19 @@
     </div>
     <div id="no-detect" class="overlay-pill" style="display:none">Không tìm thấy kim</div>
     <div id="set-pill" class="overlay-pill set-ok" style="display:none">✔ Đã SET</div>
+    <div id="tap-hint" class="overlay-pill tap-hint" style="display:none"></div>
+  </div>
+
+  <!-- ── View controls: zoom / tự căn / mặt da ── -->
+  <div class="view-ctrl">
+    <button id="btn-auto" class="btn btn-mini on">TỰ CĂN</button>
+    <input id="zoom" type="range" min="1" max="8" step="0.1" value="2.5" aria-label="Zoom">
+    <span id="zoom-lbl" class="zoom-lbl">1.0×</span>
+    <button id="btn-skin" class="btn btn-mini">MẶT DA</button>
+  </div>
+  <div id="view-hint" class="view-hint">
+    Đặt máy cách kim 25–30 cm rồi zoom — đừng đưa máy lại gần (ảnh sẽ mờ).
+    Chạm vào hình để dời tâm.
   </div>
 
   <!-- ── Student ID ── -->
@@ -114,7 +127,35 @@
 
   <!-- ── Settings panel ── -->
   <section id="settings-panel" class="card settings-panel" style="display:none">
-    <div class="settings-title">Ngưỡng HSV (màu xanh lá đầu kim)</div>
+    <div class="settings-title">Camera</div>
+    <div class="hsv-row">
+      <span class="hsv-label">Ống kính</span>
+      <select id="cam-select" class="cam-select"><option value="">Mặc định (camera sau)</option></select>
+    </div>
+    <div id="cam-info" class="cam-info">—</div>
+    <div class="settings-divider"></div>
+
+    <div class="settings-title">Hình học (góc nghiêng &amp; khoảng cách)</div>
+    <div class="hsv-row">
+      <span class="hsv-label">Nghiêng</span>
+      <label class="hsv-field scale-field">độ<input id="tilt" type="number" min="20" max="90" step="1" value="75"></label>
+      <button id="btn-tilt" class="btn btn-mini">ĐO BẰNG CẢM BIẾN</button>
+    </div>
+    <div class="hsv-row">
+      <span class="hsv-label">Tỉ lệ</span>
+      <label class="hsv-field scale-field">cm/px<input id="px-scale" type="number" step="0.0001" min="0.0001" max="1" placeholder="chưa có"></label>
+      <button id="btn-calib" class="btn btn-mini">HIỆU CHUẨN</button>
+    </div>
+    <div class="cam-info">
+      Hiệu chuẩn: đặt MẶT DA tại điểm châm, giữ kim thẳng đứng với mũi kim chạm da,
+      rồi bấm HIỆU CHUẨN. Làm lại khi đổi khoảng cách hoặc góc giá đỡ.
+    </div>
+    <div class="settings-divider"></div>
+
+    <div class="settings-title">Ngưỡng HSV (màu đầu kim)</div>
+    <div class="hsv-row">
+      <button id="btn-pick" class="btn btn-mini">LẤY MÀU KIM (chạm vào đầu kim)</button>
+    </div>
     <div class="hsv-row">
       <span class="hsv-label">Thấp</span>
       <label class="hsv-field">H<input id="hsv-lh" type="number" min="0" max="179" value="97"></label>
@@ -126,11 +167,6 @@
       <label class="hsv-field">H<input id="hsv-uh" type="number" min="0" max="179" value="136"></label>
       <label class="hsv-field">S<input id="hsv-us" type="number" min="0" max="255" value="255"></label>
       <label class="hsv-field">V<input id="hsv-uv" type="number" min="0" max="255" value="255"></label>
-    </div>
-    <div class="settings-divider"></div>
-    <div class="hsv-row">
-      <span class="hsv-label">Tỉ lệ</span>
-      <label class="hsv-field scale-field">cm/px<input id="px-scale" type="number" step="0.0001" min="0.001" max="1" value="0.0177"></label>
     </div>
     <button id="btn-apply" class="btn btn-apply">ÁP DỤNG</button>
     <span id="apply-msg" class="hint" style="margin-top:4px"></span>
