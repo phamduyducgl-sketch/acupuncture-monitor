@@ -3,215 +3,169 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0,
-        maximum-scale=1.0, user-scalable=no">
+        maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Acupuncture Monitor</title>
-  <link rel="stylesheet" href="css/style.css?v=6">
+  <link rel="stylesheet" href="css/style.css?v=11">
 </head>
 <body>
 
-  <!-- ── Header ── -->
-  <header>
-    <h1>Acupuncture Monitor</h1>
-    <div style="display:flex;align-items:center;gap:8px">
-      <button id="btn-theme" class="btn-icon">Sáng</button>
-      <div id="status-bar">
-        <span id="cv-status" class="badge badge-warn">⏳ OpenCV</span>
-        <span id="cam-status" class="badge">📷 Tắt</span>
-      </div>
-    </div>
-  </header>
-
-  <!-- ── Camera view ── -->
+  <!-- ── Camera phủ toàn màn hình ── -->
   <div class="cam-wrap">
     <video id="video" playsinline autoplay muted></video>
     <canvas id="canvas"></canvas>
-    <div id="cam-placeholder" class="cam-placeholder">
-      📷<br>Nhấn BẬT CAMERA để bắt đầu
-    </div>
-    <div id="no-detect" class="overlay-pill" style="display:none">Không tìm thấy kim</div>
-    <div id="set-pill" class="overlay-pill set-ok" style="display:none">✔ Đã SET</div>
-    <div id="tap-hint" class="overlay-pill tap-hint" style="display:none"></div>
-    <div id="hud" class="hud" style="display:none"></div>
+    <button id="cam-placeholder" class="cam-placeholder">📷<br>Chạm để bật camera</button>
   </div>
 
-  <!-- ── View controls: zoom / tự căn / mặt da ── -->
-  <div class="view-ctrl">
-    <button id="btn-auto" class="btn btn-mini on">TỰ CĂN</button>
-    <input id="zoom" type="range" min="1" max="8" step="0.1" value="2.5" aria-label="Zoom">
-    <span id="zoom-lbl" class="zoom-lbl">1.0×</span>
-  </div>
-  <div class="view-ctrl">
-    <button id="btn-skin" class="btn btn-mini" style="flex:1">MẶT DA</button>
-    <button id="btn-region" class="btn btn-mini" style="flex:1">KHOANH VÙNG</button>
-  </div>
-  <div id="view-hint" class="view-hint">
-    Đặt máy cách kim 25–30 cm rồi zoom — đừng đưa máy lại gần (ảnh sẽ mờ).
-    Chạm vào hình để dời tâm. Sau khi hiệu chuẩn, vòng tròn vàng là mũi kim dự đoán:
-    đưa nó trùng chấm xanh trên mặt da rồi châm.
-  </div>
-
-  <!-- ── Student ID ── -->
-  <section class="card row-gap">
-    <div class="input-row">
-      <input id="stu-id" type="text" placeholder="Nhập MSSV / ID"
+  <!-- ── Trên: MSSV + nút hệ thống, rồi hàng công cụ hiệu chỉnh ── -->
+  <div class="bar top">
+    <div class="bar-row">
+      <input id="stu-id" type="text" placeholder="MSSV / ID" aria-label="MSSV"
              autocomplete="off" autocorrect="off" autocapitalize="off">
-      <button id="btn-save" class="btn btn-yellow">LƯU</button>
+      <span id="cv-status" class="dot warn" title="OpenCV đang tải"></span>
+      <button id="btn-cam" class="chip icon" aria-label="Bật/tắt camera">📷</button>
+      <button id="btn-help" class="chip icon" aria-label="Hướng dẫn">?</button>
+      <button id="btn-settings" class="chip icon" aria-label="Cài đặt">⚙</button>
     </div>
-    <span id="save-msg" class="hint"></span>
-  </section>
-
-  <!-- ── Action buttons ── -->
-  <div class="action-row">
-    <button id="btn-set"     class="btn btn-blue">SET VỊ TRÍ</button>
-    <button id="btn-display" class="btn btn-green">HIỂN THỊ KQ</button>
+    <div class="bar-row four">
+      <button id="btn-auto"   class="chip on">TỰ CĂN</button>
+      <button id="btn-skin"   class="chip">MẶT DA</button>
+      <button id="btn-region" class="chip">VÙNG</button>
+      <button id="btn-calib"  class="chip">HIỆU CHUẨN</button>
+    </div>
+    <div id="tap-hint" class="pill info" style="display:none"></div>
   </div>
 
-  <!-- ── Metrics ── -->
-  <div class="metrics-grid">
-    <div class="metric">
-      <div class="m-label">Góc châm</div>
-      <div class="m-val" id="val-angle">—</div>
-      <div class="m-unit">độ</div>
+  <!-- ── Trái: số đo hiện tại ── -->
+  <div class="side left" id="live" style="display:none">
+    <div class="s-title">HIỆN TẠI</div>
+    <div class="s-val" id="live-depth">—</div><div class="s-unit">cm sâu</div>
+    <div class="s-val" id="live-speed">—</div><div class="s-unit">cm/s</div>
+    <div class="s-val" id="live-angle">—</div><div class="s-unit">độ</div>
+  </div>
+
+  <!-- ── Phải: kết quả lần châm gần nhất ── -->
+  <div class="side right" id="last" style="display:none">
+    <div class="s-title" id="val-count">KẾT QUẢ</div>
+    <div class="s-val" id="val-len">—</div><div class="s-unit">cm sâu</div>
+    <div class="s-val" id="val-avg">—</div><div class="s-unit">cm/s</div>
+    <div class="s-val" id="val-angle">—</div><div class="s-unit">độ</div>
+  </div>
+
+  <!-- ── Giữa: số lớn khi chốt kết quả ── -->
+  <div id="flash" class="flash" style="display:none"></div>
+
+  <!-- ── Dưới: zoom + luyện tập ── -->
+  <div class="bar bottom">
+    <div id="no-detect" class="pill warn" style="display:none">Không tìm thấy kim</div>
+    <div class="bar-row">
+      <input id="zoom" type="range" min="1" max="8" step="0.1" value="2.5" aria-label="Zoom">
+      <span id="zoom-lbl" class="zoom-lbl">1.0×</span>
     </div>
-    <div class="metric">
-      <div class="m-label">Vận tốc TB</div>
-      <div class="m-val" id="val-avg">—</div>
-      <div class="m-unit">cm/s</div>
-    </div>
-    <div class="metric highlight">
-      <div class="m-label">Chiều dài</div>
-      <div class="m-val" id="val-len">—</div>
-      <div class="m-unit">cm</div>
-    </div>
-    <div class="metric">
-      <div class="m-label">Còn lại</div>
-      <div class="m-val" id="val-check">—</div>
-      <div class="m-unit">cm</div>
+    <div class="bar-row">
+      <button id="btn-practice" class="chip primary">BẮT ĐẦU LUYỆN TẬP</button>
+      <button id="btn-last" class="chip" style="display:none">KẾT QUẢ</button>
     </div>
   </div>
 
-  <!-- ── History ── -->
-  <section class="card history">
-    <div class="hist-row">
-      <span class="hist-lbl">Vận tốc</span>
-      <span class="hist-val" id="v1">—</span>
-      <span class="hist-val" id="v2">—</span>
-      <span class="hist-val" id="v3">—</span>
-      <span class="hist-unit">cm/s</span>
-    </div>
-    <div class="hist-row">
-      <span class="hist-lbl">Dịch chuyển</span>
-      <span class="hist-val" id="d1">—</span>
-      <span class="hist-val" id="d2">—</span>
-      <span class="hist-val" id="d3">—</span>
-      <span class="hist-unit">cm</span>
-    </div>
-  </section>
+  <!-- ── Cài đặt ── -->
+  <div id="settings-modal" class="modal" style="display:none">
+    <div class="modal-inner">
+      <div class="modal-top">
+        <span class="modal-title">Cài đặt</span>
+        <button class="chip icon" data-close>✕</button>
+      </div>
 
-  <!-- ── Camera toggle ── -->
-  <div class="cam-ctrl">
-    <button id="btn-cam" class="btn btn-cam">BẬT CAMERA</button>
+      <div class="set-title">Camera</div>
+      <div class="set-row">
+        <span class="set-label">Ống kính</span>
+        <select id="cam-select" class="set-input"><option value="">Mặc định (camera sau)</option></select>
+      </div>
+      <div id="cam-info" class="set-note">—</div>
+
+      <div class="set-title">Hình học</div>
+      <div class="set-row">
+        <span class="set-label">Góc nghiêng máy (độ)</span>
+        <input id="tilt" class="set-input narrow" type="number" min="20" max="90" step="1" value="75">
+        <button id="btn-tilt" class="chip">ĐO</button>
+      </div>
+      <div class="set-row">
+        <span class="set-label">Kim dài (cm)</span>
+        <input id="needle-len" class="set-input narrow" type="number" step="0.1" min="1" max="20" value="5.1">
+      </div>
+      <div class="set-row">
+        <span class="set-label">Tỉ lệ (cm/px)</span>
+        <input id="px-scale" class="set-input narrow" type="number" step="0.0001" min="0.0001" max="1" placeholder="chưa có">
+      </div>
+
+      <div class="set-title">Báo kết quả khi kim đứng yên 1 giây</div>
+      <label class="set-check"><input id="opt-flash" type="checkbox" checked> Hiện số lớn trên màn hình</label>
+      <label class="set-check"><input id="opt-voice" type="checkbox"> Tiếng bíp và đọc kết quả bằng giọng nói</label>
+    </div>
   </div>
 
-  <!-- ── Export ── -->
-  <div class="cam-ctrl" style="padding-top:0">
-    <button id="btn-export" class="btn btn-export">⬇ TẢI FILE CSV</button>
+  <!-- ── Hướng dẫn ── -->
+  <div id="help-modal" class="modal" style="display:none">
+    <div class="modal-inner">
+      <div class="modal-top">
+        <span class="modal-title">Hướng dẫn sử dụng</span>
+        <button class="chip icon" data-close>✕</button>
+      </div>
+      <div class="help">
+        <h4>Chuẩn bị (một lần cho mỗi vị trí giá đỡ)</h4>
+        <ol>
+          <li>Đặt máy cách kim 25–30 cm rồi dùng thanh zoom ở dưới; đừng đưa máy lại gần vì ảnh sẽ mờ.</li>
+          <li><b>VÙNG</b>: kéo ngón tay vẽ khung bao quanh kim, đủ rộng cho cả lúc nhấc lên và châm xuống.
+              Vật mảnh, thẳng, dựng đứng trong khung được coi là kim. Bấm lại để bỏ vùng.</li>
+          <li><b>MẶT DA</b>: chạm vào đúng điểm kim sẽ đâm vào da.</li>
+          <li>Trong ⚙ nhập <b>Kim dài</b> (đỉnh cán → mũi kim) và <b>Góc nghiêng máy</b>.</li>
+          <li><b>HIỆU CHUẨN</b>: giữ kim thẳng đứng, mũi kim chạm da tại chấm xanh, rồi bấm.</li>
+        </ol>
+        <h4>Trên màn hình</h4>
+        <ul>
+          <li>Chấm đỏ: đỉnh kim. Đường vàng: thân kim; vòng tròn vàng: mũi kim dự đoán.</li>
+          <li>Chấm và đường xanh lá: điểm châm và mức mặt da. Khung xanh dương: vùng tìm kim.</li>
+          <li>Bên trái: độ sâu, tốc độ, góc kim hiện tại. Bên phải: kết quả lần châm vừa chốt.</li>
+          <li>Chạm vào hình để dời tâm; <b>TỰ CĂN</b> để app tự zoom vào kim.</li>
+        </ul>
+        <h4>Luyện tập</h4>
+        <ol>
+          <li>Nhập MSSV ở góc trên trái, bấm <b>BẮT ĐẦU LUYỆN TẬP</b>.</li>
+          <li>Đưa mũi kim (vòng tròn vàng) trùng chấm xanh rồi châm.</li>
+          <li>Buông tay: kim đứng yên 1 giây thì app tự chốt và báo kết quả. Rút kim ra để châm lần tiếp.</li>
+          <li><b>KẾT THÚC</b> để xem biểu đồ, tải ảnh, tải CSV hoặc chia sẻ / gửi mail.</li>
+        </ol>
+        <h4>Lưu ý</h4>
+        <ul>
+          <li>Làm lại HIỆU CHUẨN khi đổi khoảng cách, góc giá đỡ hoặc loại kim.</li>
+          <li>Khi ngón tay che đỉnh cán kim, số đo tạm thời không chính xác; kết quả chỉ được chốt khi kim đứng yên.</li>
+        </ul>
+      </div>
+    </div>
   </div>
 
-  <!-- ── Chart ── -->
-  <div class="cam-ctrl" style="padding-top:0">
-    <button id="btn-chart" class="btn btn-chart">BIỂU ĐỒ HỌC TẬP</button>
+  <!-- ── Kết quả buổi luyện tập ── -->
+  <div id="result-modal" class="modal" style="display:none">
+    <div class="modal-inner">
+      <div class="modal-top">
+        <span class="modal-title">Kết quả luyện tập</span>
+        <button class="chip icon" data-close>✕</button>
+      </div>
+      <canvas id="res-canvas" class="res-canvas"></canvas>
+      <div class="bar-row three" style="margin-top:10px">
+        <button id="btn-png"   class="chip">TẢI ẢNH</button>
+        <button id="btn-csv"   class="chip">TẢI CSV</button>
+        <button id="btn-share" class="chip on">CHIA SẺ / MAIL</button>
+      </div>
+    </div>
   </div>
-
-  <!-- ── Settings toggle ── -->
-  <div class="cam-ctrl" style="padding-top:0">
-    <button id="btn-settings" class="btn btn-settings">⚙ CÀI ĐẶT</button>
-  </div>
-
-  <!-- ── Settings panel ── -->
-  <section id="settings-panel" class="card settings-panel" style="display:none">
-    <div class="settings-title">Camera</div>
-    <div class="hsv-row">
-      <span class="hsv-label">Ống kính</span>
-      <select id="cam-select" class="cam-select"><option value="">Mặc định (camera sau)</option></select>
-    </div>
-    <div id="cam-info" class="cam-info">—</div>
-    <div class="settings-divider"></div>
-
-    <div class="settings-title">Hình học (góc nghiêng &amp; khoảng cách)</div>
-    <div class="hsv-row">
-      <span class="hsv-label">Nghiêng</span>
-      <label class="hsv-field scale-field">độ<input id="tilt" type="number" min="20" max="90" step="1" value="75"></label>
-      <button id="btn-tilt" class="btn btn-mini">ĐO BẰNG CẢM BIẾN</button>
-    </div>
-    <div class="hsv-row">
-      <span class="hsv-label">Tỉ lệ</span>
-      <label class="hsv-field scale-field">cm/px<input id="px-scale" type="number" step="0.0001" min="0.0001" max="1" placeholder="chưa có"></label>
-      <button id="btn-calib" class="btn btn-mini">HIỆU CHUẨN</button>
-    </div>
-    <div class="hsv-row">
-      <span class="hsv-label">Kim</span>
-      <label class="hsv-field scale-field">dài (cm)<input id="needle-len" type="number" step="0.1" min="1" max="20" value="5.1"></label>
-    </div>
-    <div class="cam-info">
-      "Kim dài" = từ đỉnh cán kim đến mũi kim (đo bằng thước), bấm ÁP DỤNG sau khi sửa.
-      Hiệu chuẩn: đặt MẶT DA tại điểm châm, giữ kim thẳng đứng với mũi kim chạm da,
-      rồi bấm HIỆU CHUẨN. Làm lại khi đổi khoảng cách, góc giá đỡ hoặc loại kim.
-    </div>
-    <div class="settings-divider"></div>
-
-    <div class="settings-title">Ngưỡng HSV (màu cán kim)</div>
-    <div class="hsv-row">
-      <button id="btn-pick" class="btn btn-mini">LẤY MÀU KIM (chạm vào cán kim)</button>
-    </div>
-    <div class="hsv-row">
-      <span class="hsv-label">Thấp</span>
-      <label class="hsv-field">H<input id="hsv-lh" type="number" min="0" max="179" value="60"></label>
-      <label class="hsv-field">S<input id="hsv-ls" type="number" min="0" max="255" value="70"></label>
-      <label class="hsv-field">V<input id="hsv-lv" type="number" min="0" max="255" value="40"></label>
-    </div>
-    <div class="hsv-row">
-      <span class="hsv-label">Cao</span>
-      <label class="hsv-field">H<input id="hsv-uh" type="number" min="0" max="179" value="135"></label>
-      <label class="hsv-field">S<input id="hsv-us" type="number" min="0" max="255" value="255"></label>
-      <label class="hsv-field">V<input id="hsv-uv" type="number" min="0" max="255" value="255"></label>
-    </div>
-    <button id="btn-apply" class="btn btn-apply">ÁP DỤNG</button>
-    <span id="apply-msg" class="hint" style="margin-top:4px"></span>
-  </section>
 
   <div id="toast" class="toast" style="display:none" role="status"></div>
 
-  <!-- ── Chart modal ── -->
-  <div id="chart-modal" class="chart-modal" style="display:none">
-    <div class="chart-inner">
-      <div class="chart-topbar">
-        <span id="chart-title" class="chart-title">Đường cong học tập</span>
-        <button id="btn-chart-close" class="btn-icon">✕</button>
-      </div>
-      <div class="chart-tabs" id="chart-tabs">
-        <button class="ctab active" data-idx="2" data-unit="cm">Chiều dài</button>
-        <button class="ctab" data-idx="0" data-unit="cm/s">Vận tốc</button>
-        <button class="ctab" data-idx="1" data-unit="độ">Góc châm</button>
-      </div>
-      <div class="chart-wrap">
-        <canvas id="lc-canvas"></canvas>
-      </div>
-      <div id="chart-info" class="chart-info"></div>
-    </div>
-  </div>
-
-  <!-- ── Scripts (order matters) ── -->
-  <!--
-    OpenCV.js ~8MB — loads asynchronously.
-    onOpenCvReady() được gọi khi tải xong.
-  -->
-  <script src="js/needle_calculator.js?v=6"></script>
-  <script src="js/data_recorder.js?v=6"></script>
-  <script src="js/needle_detector.js?v=6"></script>
-  <script src="js/app.js?v=6"></script>
+  <!-- ── Scripts ── -->
+  <script src="js/needle_detector.js?v=11"></script>
+  <script src="js/app.js?v=11"></script>
   <!-- OpenCV tải sau app.js để hàm onOpenCvScriptLoaded luôn tồn tại khi onload chạy -->
   <script async
     src="js/opencv.js"
