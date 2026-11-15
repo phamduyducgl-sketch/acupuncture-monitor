@@ -17,7 +17,7 @@ class NeedleDetector {
    * @param {number}   opts.minArea  - diện tích vùng màu tối thiểu (pixel²)
    */
   constructor(opts = {}) {
-    this.hsvLower = opts.hsvLower ?? [60, 60, 40];
+    this.hsvLower = opts.hsvLower ?? [60, 70, 40];
     this.hsvUpper = opts.hsvUpper ?? [135, 255, 255];
     this.minArea  = opts.minArea  ?? 60;
 
@@ -32,9 +32,10 @@ class NeedleDetector {
   /**
    * @param   {HTMLCanvasElement} canvas
    * @param   {[number,number]|null} hint - vị trí đỉnh kim ở khung trước (pixel canvas)
+   * @param   {[number,number]|null} skin - điểm châm trên da (pixel canvas), nếu đã đặt
    * @returns {{found, center, top, bottom, incline, axisOk, lengthPx, area, vertices}}
    */
-  detect(canvas, hint = null) {
+  detect(canvas, hint = null, skin = null) {
     const result = {
       found: false, center: [0, 0], top: null, bottom: null,
       incline: 90, axisOk: false, lengthPx: 0, area: 0, vertices: null,
@@ -68,7 +69,18 @@ class NeedleDetector {
       for (let i = 0; i < contours.size(); i++) {
         const c    = contours.get(i);
         const area = cv.contourArea(c);
-        if (area >= this.minArea) cands.push(NeedleDetector._describe(cv.minAreaRect(c), area));
+        if (area >= this.minArea) {
+          const d  = NeedleDetector._describe(cv.minAreaRect(c), area);
+          const br = cv.boundingRect(c);
+          const W  = canvas.width, H = canvas.height;
+          const L = br.x <= 1, R = br.x + br.width >= W - 2;
+          const T = br.y <= 1, B = br.y + br.height >= H - 2;
+          // Vật nền bị cắt bởi mép khung (dải ngang/dọc lớn) hoặc quá dày → không phải cán kim.
+          const edgeBand = (L && R) || (T && B) ||
+                           ((T || B) && br.width  > 0.25 * W) ||
+                           ((L || R) && br.height > 0.25 * H);
+          if (!edgeBand && d.short <= 0.1 * W) cands.push(d);
+        }
         c.delete();
       }
       if (!cands.length) return result;
@@ -83,6 +95,15 @@ class NeedleDetector {
         if (hint) {
           const d = Math.hypot(c.top[0] - hint[0], c.top[1] - hint[1]) / (0.15 * diag);
           score /= 1 + d * d;
+        }
+        if (skin && c.elong >= 1.6) {
+          // Trục kim kéo dài phải đi gần điểm châm trên da.
+          const ux = c.bottom[0] - c.top[0], uy = c.bottom[1] - c.top[1];
+          const un = Math.hypot(ux, uy) || 1;
+          const lat = Math.abs((skin[0] - c.top[0]) * uy - (skin[1] - c.top[1]) * ux) / un;
+          const q = lat / (0.08 * diag);
+          score /= 1 + q * q;
+          if (c.top[1] > skin[1]) score *= 0.05;   // nằm dưới mặt da → gần như chắc chắn không phải kim
         }
         if (score > best) { best = score; main = c; }
       }

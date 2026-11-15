@@ -95,7 +95,7 @@ const view = {
   hits: 0, lost: 0,
 };
 // Trạng thái bám kim (toạ độ khung gốc, đã làm mượt)
-const track = { top: null, bottom: null, deg: 90, misses: 0 };
+const track = { top: null, bottom: null, dir: null, deg: 90, misses: 0 };
 const vwatch = { t: -1, since: 0, seen: false, tried: false, busy: false };
 const geo = {
   tiltDeg: clamp(store.get('tilt', 75), 20, 90),  // góc nghiêng điện thoại so với mặt bàn
@@ -365,6 +365,18 @@ function trackUpdate(raw) {
     const mix = (o, n) => [o[0] + a * (n[0] - o[0]), o[1] + a * (n[1] - o[1])];
     track.top    = cont ? mix(track.top, top) : top;
     track.bottom = cont && track.bottom ? mix(track.bottom, bottom) : bottom;
+    if (raw.axisOk && raw.lengthPx > 12) {
+      // Hướng thân kim (từ đỉnh xuống mũi), chỉ cập nhật khi thấy đủ dài để tin cậy.
+      const dx = bottom[0] - top[0], dy = bottom[1] - top[1];
+      const n  = Math.hypot(dx, dy) || 1;
+      let d = [dx / n, dy / n];
+      if (cont && track.dir) {
+        d = mix(track.dir, d);
+        const m = Math.hypot(d[0], d[1]) || 1;
+        d = [d[0] / m, d[1] / m];
+      }
+      track.dir = d;
+    }
     if (raw.axisOk) {
       const deg = correctAngle(raw.incline);
       track.deg = cont ? track.deg + a * (deg - track.deg) : deg;
@@ -402,7 +414,8 @@ function frameStep() {
       if (pendingPick) { pickColor(pendingPick); pendingPick = null; }
 
       const hint = track.top ? srcToCanvas(track.top[0], track.top[1]) : null;
-      const r    = trackUpdate(detector.detect(canvas, hint));
+      const sk   = skinSrc();
+      const r    = trackUpdate(detector.detect(canvas, hint, sk ? srcToCanvas(sk[0], sk[1]) : null));
       lastResult = r;
 
       const dt = (now - lastFrameT) / 1000;
@@ -428,6 +441,38 @@ function frameStep() {
   } finally {
     if (streaming) loopHandle = setTimeout(frameStep, delay);
   }
+}
+
+// ── Mũi kim dự đoán & độ sâu ──────────────────────────────────────────────────
+/** Vị trí mũi kim = đỉnh cán + chiều dài kim dọc theo hướng thân kim (đã bù nghiêng). */
+function tipSrc() {
+  if (!geo.cmPerPx || !track.top || !track.dir) return null;
+  const [dx, dy] = track.dir;
+  const t = needleLenCm / (geo.cmPerPx * Math.hypot(dx, dy / cosPitch()));
+  return [track.top[0] + dx * t, track.top[1] + dy * t];
+}
+
+/**
+ * Độ sâu = phần thân kim nằm dưới đường mặt da, đo dọc theo kim
+ * (tức đoạn đường vàng vượt qua đường đứt nét xanh).
+ * Kim gần nằm ngang (<10°) thì dùng: chiều dài kim − khoảng cách đỉnh kim → điểm châm.
+ */
+function depthCm() {
+  const s = skinSrc();
+  if (!s || !geo.cmPerPx || !track.top) return null;
+  const cp  = cosPitch();
+  const tip = tipSrc();
+  let depth;
+  if (tip) {
+    const rx = track.dir[0], ry = track.dir[1] / cp;
+    const sinA = ry / (Math.hypot(rx, ry) || 1);
+    if (sinA > 0.17) depth = (tip[1] - s[1]) / cp * geo.cmPerPx / sinA;
+  }
+  if (depth === undefined) {
+    const d = Math.hypot(track.top[0] - s[0], (track.top[1] - s[1]) / cp) * geo.cmPerPx;
+    depth = needleLenCm - d;
+  }
+  return clamp(Math.round(depth * 10) / 10, 0, needleLenCm);
 }
 
 // ── Tự dò tìm & căn khung ─────────────────────────────────────────────────────
@@ -460,7 +505,8 @@ function backgroundSearch(vw, vh) {
   const w = Math.round(vw * s), h = Math.round(vh * s);
   if (offCanvas.width !== w || offCanvas.height !== h) { offCanvas.width = w; offCanvas.height = h; }
   offCtx.drawImage(video, 0, 0, w, h);
-  const raw = searchDetector.detect(offCanvas);
+  const sk  = skinSrc();
+  const raw = searchDetector.detect(offCanvas, null, sk ? [sk[0] * s, sk[1] * s] : null);
   if (!raw.found) return;
   const top = [raw.top[0] / s, raw.top[1] / s];
   if (outOfView(top)) { track.top = null; frameOn(top, vw, vh); }
@@ -650,10 +696,30 @@ function drawNeedle(r) {
     ctx.stroke();
   }
   const [tx, ty] = srcToCanvas(track.top[0], track.top[1]);
-  if (track.bottom) {
-    const [bx, by] = srcToCanvas(track.bottom[0], track.bottom[1]);
-    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(bx, by);
+  const tip = tipSrc();
+  const end = tip || track.bottom;       // chưa hiệu chuẩn → chỉ vẽ phần cán nhìn thấy
+  if (end) {
+    const [ex, ey] = srcToCanvas(end[0], end[1]);
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(ex, ey);
     ctx.strokeStyle = '#ffd33d'; ctx.lineWidth = 2; ctx.stroke();
+    if (tip) {                           // dấu mũi kim dự đoán
+      ctx.beginPath(); ctx.arc(ex, ey, 6, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffd33d'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath(); ctx.arc(ex, ey, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd33d'; ctx.fill();
+      const depth = depthCm();
+      if (depth !== null) {
+        const label = `sâu ${depth.toFixed(1)} cm`;
+        ctx.font = 'bold 15px -apple-system, Arial, sans-serif';
+        const w  = ctx.measureText(label).width + 10;
+        const lx = clamp(ex + 12, 2, canvas.width - w - 2);
+        const ly = clamp(ey - 10, 20, canvas.height - 6);
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(lx, ly - 16, w, 22);
+        ctx.fillStyle = '#ffd33d';
+        ctx.fillText(label, lx + 5, ly);
+      }
+    }
   }
   ctx.beginPath();
   ctx.arc(tx, ty, 5, 0, Math.PI * 2);
@@ -713,6 +779,12 @@ btnDisplay.addEventListener('click', () => {
   const snap = calculator.getSnapshot(
     toNorm(lastResult.src), Math.round(lastResult.realDeg), lastResult.realRad
   );
+  // Độ sâu tính trực tiếp từ đỉnh kim tới điểm châm trên da (không cộng dồn từ lúc SET).
+  const depth = depthCm();
+  if (depth !== null) {
+    snap.lengthCm    = depth;
+    snap.remainingCm = Math.round((needleLenCm - depth) * 10) / 10;
+  }
   renderSnapshot(snap);
 
   try {
