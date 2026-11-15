@@ -67,6 +67,16 @@ header h1 { font-size: 1rem; font-weight: 600; color: #e6edf3; }
   background: rgba(35,134,54,0.9);
   top: 10px; bottom: auto; left: auto; right: 10px; transform: none;
 }
+.hud {
+  position: absolute; right: 8px; bottom: 8px;
+  padding: 6px 10px; border-radius: 10px;
+  background: rgba(0,0,0,0.72); color: #ffd33d;
+  font-size: 0.8rem; text-align: right; line-height: 1.2;
+  font-variant-numeric: tabular-nums; pointer-events: none;
+  min-width: 5.5em;
+}
+.hud b    { font-size: 1.5rem; font-weight: 700; }
+.hud span { display: block; font-size: 0.78rem; color: #e6edf3; opacity: 0.9; }
 .toast {
   position: fixed; left: 50%; bottom: 24px; z-index: 200;
   transform: translateX(-50%);

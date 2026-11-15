@@ -101,10 +101,14 @@ const geo = {
   tiltDeg: clamp(store.get('tilt', 75), 20, 90),  // góc nghiêng điện thoại so với mặt bàn
   cmPerPx: null,                                  // cm trên 1 pixel khung gốc
   skin: store.get('skin', null),                  // điểm châm trên da {fx, fy}
+  region: store.get('region', null),              // vùng khoanh nhận diện {x0, y0, x1, y1} (tỉ lệ 0–1)
 };
 let roi         = { x: 0, y: 0, w: 1, h: 1 };
 let srcW        = 0;
-let tapMode     = null;    // null | 'skin' | 'color'
+let tapMode     = null;    // null | 'skin' | 'color' | 'region'
+let drag        = null;    // khung đang kéo khi khoanh vùng
+let suppressClick = false;
+const hud = { ema: null, shown: null, vel: 0, lastT: 0 };
 let pendingPick = null;
 let lastFrameT  = 0;
 let focusInfo   = '';
@@ -113,6 +117,8 @@ const zoomEl    = document.getElementById('zoom');
 const zoomLbl   = document.getElementById('zoom-lbl');
 const btnAuto   = document.getElementById('btn-auto');
 const btnSkin   = document.getElementById('btn-skin');
+const btnRegion = document.getElementById('btn-region');
+const hudEl     = document.getElementById('hud');
 const tapHint   = document.getElementById('tap-hint');
 const camSelect = document.getElementById('cam-select');
 const camInfo   = document.getElementById('cam-info');
@@ -167,8 +173,86 @@ function setTapMode(mode) {
   tapMode = mode;
   btnSkin.classList.toggle('on', mode === 'skin');
   tapHint.style.display = mode ? 'block' : 'none';
-  tapHint.textContent = mode === 'skin'  ? 'Chạm vào điểm châm trên mặt da'
-                      : mode === 'color' ? 'Chạm vào cán kim để lấy màu' : '';
+  tapHint.textContent = mode === 'skin'   ? 'Chạm vào điểm châm trên mặt da'
+                      : mode === 'color'  ? 'Chạm vào cán kim để lấy màu'
+                      : mode === 'region' ? 'Kéo ngón tay vẽ khung quanh kim' : '';
+  canvas.style.touchAction = mode === 'region' ? 'none' : 'manipulation';
+  if (mode !== 'region') drag = null;
+  updateRegionBtn();
+}
+
+// ── Khoanh vùng nhận diện ─────────────────────────────────────────────────────
+function updateRegionBtn() {
+  btnRegion.textContent = geo.region ? 'BỎ VÙNG' : 'KHOANH VÙNG';
+  btnRegion.classList.toggle('on', tapMode === 'region' || !!geo.region);
+}
+/** Vùng khoanh quy về pixel canvas hiện tại, hoặc null nếu chưa khoanh. */
+function regionCanvas() {
+  if (!geo.region || !video.videoWidth) return null;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const a = srcToCanvas(geo.region.x0 * vw, geo.region.y0 * vh);
+  const b = srcToCanvas(geo.region.x1 * vw, geo.region.y1 * vh);
+  return [a[0], a[1], b[0], b[1]];
+}
+
+btnRegion.addEventListener('click', () => {
+  if (geo.region) {                       // đang có vùng → bỏ
+    geo.region = null;
+    store.set('region', null);
+    track.top = null;
+    setTapMode(null);
+    return;
+  }
+  if (!streaming) { notify('Hãy bật camera trước.'); return; }
+  setTapMode(tapMode === 'region' ? null : 'region');
+});
+
+canvas.addEventListener('pointerdown', e => {
+  if (tapMode !== 'region' || !streaming) return;
+  e.preventDefault();
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  const p = canvasToSrc(...eventToCanvas(e));
+  drag = { a: p, b: p };
+});
+canvas.addEventListener('pointermove', e => {
+  if (drag) drag.b = canvasToSrc(...eventToCanvas(e));
+});
+canvas.addEventListener('pointercancel', () => { drag = null; });
+canvas.addEventListener('pointerup', () => {
+  if (!drag) return;
+  const { a, b } = drag;
+  drag = null;
+  suppressClick = true;
+  setTimeout(() => { suppressClick = false; }, 400);
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const x0 = Math.min(a[0], b[0]), x1 = Math.max(a[0], b[0]);
+  const y0 = Math.min(a[1], b[1]), y1 = Math.max(a[1], b[1]);
+  if (x1 - x0 < roi.w * 0.04 || y1 - y0 < roi.h * 0.04) {
+    notify('Kéo ngón tay trên hình để vẽ khung bao quanh kim.');
+    return;
+  }
+  geo.region = { x0: x0 / vw, y0: y0 / vh, x1: x1 / vw, y1: y1 / vh };
+  store.set('region', geo.region);
+  track.top = null;                       // tìm lại kim trong vùng mới
+  setTapMode(null);
+});
+
+function drawRegion() {
+  let r = null, live = false;
+  if (drag) {
+    const a = srcToCanvas(drag.a[0], drag.a[1]), b = srcToCanvas(drag.b[0], drag.b[1]);
+    r = [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+    live = true;
+  } else {
+    r = regionCanvas();
+  }
+  if (!r) return;
+  ctx.save();
+  ctx.strokeStyle = live ? '#ffd33d' : '#58a6ff';
+  ctx.lineWidth = live ? 2 : 1.5;
+  ctx.setLineDash([6, 5]);
+  ctx.strokeRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
+  ctx.restore();
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
@@ -254,6 +338,7 @@ function stopCamera() {
   video.srcObject = null;
   lastResult = null;
   track.top = null;
+  hudEl.style.display = 'none'; hud.ema = null; hud.shown = null;
   vwatch.t = -1; vwatch.seen = false;
   setTapMode(null);
 
@@ -415,15 +500,21 @@ function frameStep() {
 
       const hint = track.top ? srcToCanvas(track.top[0], track.top[1]) : null;
       const sk   = skinSrc();
-      const r    = trackUpdate(detector.detect(canvas, hint, sk ? srcToCanvas(sk[0], sk[1]) : null));
+      const r    = trackUpdate(detector.detect(canvas, {
+        hint,
+        skin:   sk ? srcToCanvas(sk[0], sk[1]) : null,
+        region: regionCanvas(),
+      }));
       lastResult = r;
 
       const dt = (now - lastFrameT) / 1000;
       lastFrameT = now;
 
+      drawRegion();
       drawSkin();
       if (r.found) {
         drawNeedle(r);
+        updateHud(now, dt);
         if (r.fresh && geo.cmPerPx && dt > 0 && dt < 0.5) {
           calculator.frameInterval = dt;     // thời gian thực giữa 2 khung
           calculator.update(toNorm(r.src));
@@ -457,7 +548,7 @@ function tipSrc() {
  * (tức đoạn đường vàng vượt qua đường đứt nét xanh).
  * Kim gần nằm ngang (<10°) thì dùng: chiều dài kim − khoảng cách đỉnh kim → điểm châm.
  */
-function depthCm() {
+function depthRaw() {
   const s = skinSrc();
   if (!s || !geo.cmPerPx || !track.top) return null;
   const cp  = cosPitch();
@@ -472,7 +563,40 @@ function depthCm() {
     const d = Math.hypot(track.top[0] - s[0], (track.top[1] - s[1]) / cp) * geo.cmPerPx;
     depth = needleLenCm - d;
   }
-  return clamp(Math.round(depth * 10) / 10, 0, needleLenCm);
+  return clamp(depth, 0, needleLenCm);
+}
+
+/** Độ sâu đã làm mượt (dùng cho hiển thị và ghi kết quả), làm tròn 0,1 cm. */
+function depthCm() {
+  const d = hud.ema !== null ? hud.ema : depthRaw();
+  return d === null ? null : Math.round(d * 10) / 10;
+}
+
+/**
+ * Ô số cố định ở góc dưới phải: độ sâu + tốc độ.
+ * Làm mượt theo thời gian, chỉ đổi số khi lệch đủ 0,1 cm và tối đa 4 lần/giây
+ * để kim rung không làm số nhảy.
+ */
+function updateHud(now, dt) {
+  const d = depthRaw();
+  if (d === null) { hudEl.style.display = 'none'; hud.ema = null; hud.shown = null; return; }
+
+  if (hud.ema === null || dt <= 0 || dt > 0.5) {
+    hud.ema = d; hud.vel = 0;
+  } else {
+    const prev = hud.ema;
+    hud.ema += 0.25 * (d - hud.ema);
+    hud.vel += 0.2 * (Math.abs(hud.ema - prev) / dt - hud.vel);
+  }
+  if (now - hud.lastT < 250) return;
+  hud.lastT = now;
+
+  if (hud.shown === null || Math.abs(hud.ema - hud.shown) >= 0.07) {
+    hud.shown = Math.round(hud.ema * 10) / 10;
+  }
+  const v = hud.vel < 0.15 ? 0 : hud.vel;
+  hudEl.innerHTML = `<b>${hud.shown.toFixed(1)}</b> cm<span>${v.toFixed(1)} cm/s</span>`;
+  hudEl.style.display = 'block';
 }
 
 // ── Tự dò tìm & căn khung ─────────────────────────────────────────────────────
@@ -506,7 +630,11 @@ function backgroundSearch(vw, vh) {
   if (offCanvas.width !== w || offCanvas.height !== h) { offCanvas.width = w; offCanvas.height = h; }
   offCtx.drawImage(video, 0, 0, w, h);
   const sk  = skinSrc();
-  const raw = searchDetector.detect(offCanvas, null, sk ? [sk[0] * s, sk[1] * s] : null);
+  const g   = geo.region;
+  const raw = searchDetector.detect(offCanvas, {
+    skin:   sk ? [sk[0] * s, sk[1] * s] : null,
+    region: g ? [g.x0 * w, g.y0 * h, g.x1 * w, g.y1 * h] : null,
+  });
   if (!raw.found) return;
   const top = [raw.top[0] / s, raw.top[1] / s];
   if (outOfView(top)) { track.top = null; frameOn(top, vw, vh); }
@@ -569,6 +697,7 @@ function eventToCanvas(e) {
 
 canvas.addEventListener('click', e => {
   if (!streaming || !video.videoWidth) return;
+  if (suppressClick || tapMode === 'region') return;
   const [u, v] = eventToCanvas(e);
   const [x, y] = canvasToSrc(u, v);
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -707,18 +836,6 @@ function drawNeedle(r) {
       ctx.strokeStyle = '#ffd33d'; ctx.lineWidth = 2; ctx.stroke();
       ctx.beginPath(); ctx.arc(ex, ey, 1.5, 0, Math.PI * 2);
       ctx.fillStyle = '#ffd33d'; ctx.fill();
-      const depth = depthCm();
-      if (depth !== null) {
-        const label = `sâu ${depth.toFixed(1)} cm`;
-        ctx.font = 'bold 15px -apple-system, Arial, sans-serif';
-        const w  = ctx.measureText(label).width + 10;
-        const lx = clamp(ex + 12, 2, canvas.width - w - 2);
-        const ly = clamp(ey - 10, 20, canvas.height - 6);
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(lx, ly - 16, w, 22);
-        ctx.fillStyle = '#ffd33d';
-        ctx.fillText(label, lx + 5, ly);
-      }
     }
   }
   ctx.beginPath();
@@ -1050,6 +1167,7 @@ btnApply.addEventListener('click', () => {
 
 // ── Khôi phục cài đặt đã lưu ──────────────────────────────────────────────────
 (function restoreSettings() {
+  updateRegionBtn();
   tiltEl.value = geo.tiltDeg;
   zoomEl.value = view.zoom;
   const hsv = store.get('hsv2', null);

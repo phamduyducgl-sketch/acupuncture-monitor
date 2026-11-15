@@ -31,17 +31,19 @@ class NeedleDetector {
 
   /**
    * @param   {HTMLCanvasElement} canvas
-   * @param   {[number,number]|null} hint - vị trí đỉnh kim ở khung trước (pixel canvas)
-   * @param   {[number,number]|null} skin - điểm châm trên da (pixel canvas), nếu đã đặt
+   * @param   {object} [opts]
+   * @param   {[number,number]|null} opts.hint   - vị trí đỉnh kim ở khung trước (pixel canvas)
+   * @param   {[number,number]|null} opts.skin   - điểm châm trên da (pixel canvas), nếu đã đặt
+   * @param   {number[]|null}        opts.region - [x0, y0, x1, y1] vùng người dùng khoanh (pixel canvas)
    * @returns {{found, center, top, bottom, incline, axisOk, lengthPx, area, vertices}}
    */
-  detect(canvas, hint = null, skin = null) {
+  detect(canvas, { hint = null, skin = null, region = null } = {}) {
     const result = {
       found: false, center: [0, 0], top: null, bottom: null,
       incline: 90, axisOk: false, lengthPx: 0, area: 0, vertices: null,
     };
 
-    let src = null, rgb = null, hsv = null, mask = null,
+    let src = null, rgb = null, hsv = null, mask = null, clip = null,
         contours = null, hierarchy = null;
 
     try {
@@ -60,9 +62,23 @@ class NeedleDetector {
       cv.morphologyEx(mask, mask, cv.MORPH_OPEN,  this._kOpen);   // bỏ đốm nhiễu
       cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, this._kClose);  // nối nắp + thân cán
 
+      // Giới hạn trong vùng người dùng khoanh: xoá mọi điểm màu nằm ngoài vùng.
+      let X0 = 0, Y0 = 0, X1 = canvas.width, Y1 = canvas.height;
+      if (region) {
+        X0 = Math.max(0, Math.floor(region[0])); Y0 = Math.max(0, Math.floor(region[1]));
+        X1 = Math.min(canvas.width,  Math.ceil(region[2]));
+        Y1 = Math.min(canvas.height, Math.ceil(region[3]));
+        if (X1 - X0 < 4 || Y1 - Y0 < 4) return result;      // vùng nằm ngoài khung hiện tại
+        const rect = new cv.Rect(X0, Y0, X1 - X0, Y1 - Y0);
+        clip = cv.Mat.zeros(mask.rows, mask.cols, cv.CV_8UC1);
+        const from = mask.roi(rect), to = clip.roi(rect);
+        from.copyTo(to);
+        from.delete(); to.delete();
+      }
+
       contours  = new cv.MatVector();
       hierarchy = new cv.Mat();
-      cv.findContours(mask, contours, hierarchy,
+      cv.findContours(clip || mask, contours, hierarchy,
                       cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
       const cands = [];
@@ -72,14 +88,14 @@ class NeedleDetector {
         if (area >= this.minArea) {
           const d  = NeedleDetector._describe(cv.minAreaRect(c), area);
           const br = cv.boundingRect(c);
-          const W  = canvas.width, H = canvas.height;
-          const L = br.x <= 1, R = br.x + br.width >= W - 2;
-          const T = br.y <= 1, B = br.y + br.height >= H - 2;
+          const W  = X1 - X0, H = Y1 - Y0;
+          const L = br.x <= X0 + 1, R = br.x + br.width  >= X1 - 2;
+          const T = br.y <= Y0 + 1, B = br.y + br.height >= Y1 - 2;
           // Vật nền bị cắt bởi mép khung (dải ngang/dọc lớn) hoặc quá dày → không phải cán kim.
           const edgeBand = (L && R) || (T && B) ||
                            ((T || B) && br.width  > 0.25 * W) ||
                            ((L || R) && br.height > 0.25 * H);
-          if (!edgeBand && d.short <= 0.1 * W) cands.push(d);
+          if (!edgeBand && d.short <= 0.1 * canvas.width) cands.push(d);
         }
         c.delete();
       }
@@ -149,7 +165,7 @@ class NeedleDetector {
     } catch (e) {
       console.error('NeedleDetector.detect error:', e);
     } finally {
-      [src, rgb, hsv, mask, contours, hierarchy]
+      [src, rgb, hsv, mask, clip, contours, hierarchy]
         .forEach(m => { try { if (m && !m.isDeleted?.()) m.delete(); } catch (_) {} });
     }
 
