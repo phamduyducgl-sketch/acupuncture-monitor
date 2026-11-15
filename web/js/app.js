@@ -35,6 +35,14 @@ function onOpenCvReady() {
   cvStatus.textContent = '✅ OpenCV';
   cvStatus.className   = 'badge badge-ok';
 }
+// Gọi khi script tải xong — WASM có thể chưa sẵn sàng, cần đợi onRuntimeInitialized
+function onOpenCvScriptLoaded() {
+  if (typeof cv !== 'undefined' && cv.Mat) {
+    onOpenCvReady(); // đã sẵn sàng ngay
+  } else {
+    cv['onRuntimeInitialized'] = onOpenCvReady;
+  }
+}
 function onOpenCvError() {
   cvStatus.textContent = '❌ OpenCV';
   cvStatus.style.background = '#4a1616';
