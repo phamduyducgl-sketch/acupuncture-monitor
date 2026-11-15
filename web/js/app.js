@@ -63,10 +63,26 @@ const store = {
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+// Thông báo không chặn. Không dùng alert(): trên iOS Safari hộp thoại alert
+// có thể làm video camera bị tạm dừng (hình đứng).
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function notify(msg) {
+  toastEl.textContent = msg;
+  toastEl.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.style.display = 'none'; }, 4000);
+}
+
 // ── View (vùng quan sát) & hình học ───────────────────────────────────────────
 // Mọi toạ độ đo đạc đều quy về pixel của khung hình camera gốc ("src"),
 // nên zoom / dời khung không làm sai kết quả.
-const K_CM       = NEEDLE_K_PX * PIXEL_TO_CM;  // tâm đầu kim → mũi kim (cm)
+let needleLenCm  = clamp(store.get('needleLen', NEEDLE_TOTAL_CM), 1, 20);  // đỉnh cán → mũi kim (cm)
+calculator.setNeedleLength(needleLenCm);
+const searchDetector = new NeedleDetector();   // dò ngầm toàn khung khi mất dấu
+const offCanvas      = document.createElement('canvas');
+const offCtx         = offCanvas.getContext('2d', { willReadFrequently: true });
+const HOLD_FRAMES    = 10;   // số khung giữ kết quả cũ khi mất dấu tạm thời
 const ZOOM_MAX   = 8;
 const SEARCH_LONG = 960;   // cạnh dài canvas khi quét toàn khung
 const TRACK_LONG  = 640;   // cạnh dài canvas khi đã zoom vào kim
@@ -76,8 +92,11 @@ const view = {
   cx: 0.5, cy: 0.5,        // tâm vùng quan sát (tỉ lệ 0–1 của khung gốc)
   mode: 'search',          // 'search' = toàn khung, 'track' = đã zoom
   auto: true,
-  hits: 0, misses: 0,
+  hits: 0, lost: 0,
 };
+// Trạng thái bám kim (toạ độ khung gốc, đã làm mượt)
+const track = { top: null, bottom: null, deg: 90, misses: 0 };
+const vwatch = { t: -1, since: 0, seen: false, tried: false, busy: false };
 const geo = {
   tiltDeg: clamp(store.get('tilt', 75), 20, 90),  // góc nghiêng điện thoại so với mặt bàn
   cmPerPx: null,                                  // cm trên 1 pixel khung gốc
@@ -99,6 +118,7 @@ const camSelect = document.getElementById('cam-select');
 const camInfo   = document.getElementById('cam-info');
 const tiltEl    = document.getElementById('tilt');
 const scaleEl   = document.getElementById('px-scale');
+const lenEl     = document.getElementById('needle-len');
 
 /** Hệ số co ngắn theo chiều dọc ảnh do camera nhìn chúc xuống. */
 function cosPitch() {
@@ -130,7 +150,7 @@ function setScale(cmPerPx, persist = true) {
   geo.cmPerPx = cmPerPx;
   scaleEl.value = cmPerPx ? cmPerPx.toFixed(5) : '';
   if (persist && cmPerPx && video.videoWidth) {
-    store.set('scale', { cmPerPx, w: video.videoWidth });
+    store.set('scale2', { cmPerPx, w: video.videoWidth });
   }
 }
 function setTilt(deg) {
@@ -141,14 +161,14 @@ function setTilt(deg) {
 function setAuto(on) {
   view.auto = on;
   btnAuto.classList.toggle('on', on);
-  if (on) { view.mode = 'search'; view.hits = 0; view.misses = 0; }
+  if (on) { view.mode = 'search'; view.hits = 0; view.lost = 0; track.top = null; }
 }
 function setTapMode(mode) {
   tapMode = mode;
   btnSkin.classList.toggle('on', mode === 'skin');
   tapHint.style.display = mode ? 'block' : 'none';
   tapHint.textContent = mode === 'skin'  ? 'Chạm vào điểm châm trên mặt da'
-                      : mode === 'color' ? 'Chạm vào đầu kim để lấy màu' : '';
+                      : mode === 'color' ? 'Chạm vào cán kim để lấy màu' : '';
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
@@ -221,7 +241,7 @@ async function startCamera(deviceId = null) {
     if (view.auto) setAuto(true);
     startLoop();
   } catch (err) {
-    alert('Không thể mở camera: ' + err.message
+    notify('Không thể mở camera: ' + err.message
       + '\n\nTrên iOS: dùng Safari và mở qua HTTPS hoặc localhost.');
   }
 }
@@ -233,6 +253,8 @@ function stopCamera() {
   if (stream) stream.getTracks().forEach(t => t.stop());
   video.srcObject = null;
   lastResult = null;
+  track.top = null;
+  vwatch.t = -1; vwatch.seen = false;
   setTapMode(null);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -248,6 +270,42 @@ btnCam.addEventListener('click', () => {
   if (streaming) stopCamera(); else startCamera();
 });
 
+// ── Tự khôi phục khi hình camera bị đứng ──────────────────────────────────────
+video.addEventListener('pause', () => {
+  if (streaming && video.srcObject) video.play().catch(() => {});
+});
+
+function watchVideo(now) {
+  const ct = video.currentTime;
+  if (ct !== vwatch.t) {
+    if (vwatch.t >= 0) vwatch.seen = true;
+    vwatch.t = ct; vwatch.since = now; vwatch.tried = false;
+    return;
+  }
+  if (!vwatch.seen || vwatch.busy) return;
+  const stuck = now - vwatch.since;
+  if (stuck > 1200 && !vwatch.tried) {
+    vwatch.tried = true;
+    video.play().catch(() => {});
+  } else if (stuck > 3500) {
+    recoverCamera();
+  }
+}
+
+async function recoverCamera() {
+  vwatch.busy = true;
+  try {
+    const old = video.srcObject;
+    if (old) old.getTracks().forEach(t => t.stop());
+    await attachStream(await openStream(camSelect.value || null));
+  } catch (e) {
+    console.error('recoverCamera error:', e);
+  } finally {
+    vwatch.busy = false; vwatch.t = -1; vwatch.seen = false;
+    vwatch.since = performance.now();
+  }
+}
+
 camSelect.addEventListener('change', async () => {
   const id = camSelect.value;
   store.set('camLabel', id ? camSelect.selectedOptions[0].textContent : '');
@@ -262,7 +320,7 @@ function onSourceSize(vw, vh) {
   camInfo.textContent =
     `${camInfo.dataset.label || 'camera'} · ${vw}×${vh} · lấy nét: ${focusInfo}`;
   // Tỉ lệ đã hiệu chuẩn được lưu kèm bề rộng khung → quy đổi nếu độ phân giải khác.
-  const saved = store.get('scale', null);
+  const saved = store.get('scale2', null);
   if (saved && saved.cmPerPx > 0 && saved.w > 0) {
     setScale(saved.cmPerPx * saved.w / vw, false);
   }
@@ -296,6 +354,36 @@ function layoutView(vw, vh) {
   if (view.mode === 'track' && document.activeElement !== zoomEl) zoomEl.value = view.zoom;
 }
 
+/** Làm mượt kết quả thô và giữ kết quả cũ trong vài khung khi mất dấu. */
+function trackUpdate(raw) {
+  if (raw.found) {
+    const top    = canvasToSrc(raw.top[0], raw.top[1]);
+    const bottom = canvasToSrc(raw.bottom[0], raw.bottom[1]);
+    const cont = track.top && track.misses <= HOLD_FRAMES &&
+      Math.hypot(top[0] - track.top[0], top[1] - track.top[1]) < roi.h * 0.25;
+    const a   = cont ? 0.6 : 1;
+    const mix = (o, n) => [o[0] + a * (n[0] - o[0]), o[1] + a * (n[1] - o[1])];
+    track.top    = cont ? mix(track.top, top) : top;
+    track.bottom = cont && track.bottom ? mix(track.bottom, bottom) : bottom;
+    if (raw.axisOk) {
+      const deg = correctAngle(raw.incline);
+      track.deg = cont ? track.deg + a * (deg - track.deg) : deg;
+    }
+    track.misses = 0;
+  } else {
+    track.misses++;
+    if (track.misses > 60) track.top = null;   // mất hẳn → bỏ gợi ý vị trí
+  }
+  return {
+    found:   !!track.top && track.misses <= HOLD_FRAMES,
+    fresh:   raw.found,
+    src:     track.top,
+    realDeg: track.deg,
+    realRad: track.deg * Math.PI / 180,
+    vertices: raw.vertices,
+  };
+}
+
 function frameStep() {
   if (!streaming) return;
 
@@ -305,30 +393,25 @@ function frameStep() {
     if (!opencvReady || video.readyState < 2 || !vw || !vh) {
       delay = 100;
     } else {
+      const now = performance.now();
+      watchVideo(now);
       if (vw !== srcW) onSourceSize(vw, vh);
       layoutView(vw, vh);
       ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, canvas.width, canvas.height);
 
       if (pendingPick) { pickColor(pendingPick); pendingPick = null; }
 
-      const r = detector.detect(canvas);
-      if (r.found) {
-        r.src     = canvasToSrc(r.center[0], r.center[1]);
-        r.topSrcY = canvasToSrc(0, Math.min(...r.vertices.map(p => p.y)))[1];
-        r.realDeg = correctAngle(r.incline);
-        r.realRad = r.realDeg * Math.PI / 180;
-      }
+      const hint = track.top ? srcToCanvas(track.top[0], track.top[1]) : null;
+      const r    = trackUpdate(detector.detect(canvas, hint));
       lastResult = r;
 
-      const now = performance.now();
-      const dt  = (now - lastFrameT) / 1000;
+      const dt = (now - lastFrameT) / 1000;
       lastFrameT = now;
 
       drawSkin();
       if (r.found) {
-        drawBBox(r.vertices);
-        drawCenter(r.center);
-        if (geo.cmPerPx && dt > 0 && dt < 0.5) {
+        drawNeedle(r);
+        if (r.fresh && geo.cmPerPx && dt > 0 && dt < 0.5) {
           calculator.frameInterval = dt;     // thời gian thực giữa 2 khung
           calculator.update(toNorm(r.src));
         }
@@ -348,47 +431,69 @@ function frameStep() {
 }
 
 // ── Tự dò tìm & căn khung ─────────────────────────────────────────────────────
+function outOfView([x, y]) {
+  const m = 0.04;
+  return x < roi.x + roi.w * m || x > roi.x + roi.w * (1 - m) ||
+         y < roi.y + roi.h * m || y > roi.y + roi.h * (1 - m);
+}
+
 function updateView(r, vw, vh) {
   if (!view.auto || isSet) return;   // đang đo → giữ nguyên khung
 
-  if (view.mode === 'search') {
-    if (!r.found) { view.hits = 0; return; }
-    if (++view.hits >= 3) frameOn(r, vw, vh);   // 3 khung liên tiếp để tránh nhiễu
+  if (view.mode === 'search') {      // chưa có khung: hiện toàn cảnh cho tới khi thấy kim
+    if (!r.fresh) { view.hits = 0; return; }
+    if (++view.hits >= 3) frameOn(r.src, vw, vh);
     return;
   }
 
-  if (!r.found) {
-    if (++view.misses > 40) { view.mode = 'search'; view.hits = 0; view.misses = 0; }
+  if (r.found) {
+    view.lost = 0;
+    if (r.fresh && outOfView(r.src)) frameOn(r.src, vw, vh);   // kim ra khỏi khung → căn lại
     return;
   }
-  view.misses = 0;
-  const m = 0.06, [u, v] = r.center;
-  if (u < canvas.width * m  || u > canvas.width  * (1 - m) ||
-      v < canvas.height * m || v > canvas.height * (1 - m)) {
-    frameOn(r, vw, vh);              // kim sắp ra khỏi khung → căn lại
-  }
+  // Mất dấu lâu: dò ngầm trên toàn khung, KHÔNG đổi hình đang hiển thị.
+  if (++view.lost > 60 && view.lost % 12 === 0) backgroundSearch(vw, vh);
 }
 
-/** Đặt vùng quan sát sao cho thấy trọn kim và (nếu đã đặt) điểm châm trên da. */
-function frameOn(r, vw, vh) {
-  const [mx, my] = r.src;
-  const s = skinSrc();
-  let zoom = view.zoom, cx = mx, cy;
+function backgroundSearch(vw, vh) {
+  const s = Math.min(1, SEARCH_LONG / Math.max(vw, vh));
+  const w = Math.round(vw * s), h = Math.round(vh * s);
+  if (offCanvas.width !== w || offCanvas.height !== h) { offCanvas.width = w; offCanvas.height = h; }
+  offCtx.drawImage(video, 0, 0, w, h);
+  const raw = searchDetector.detect(offCanvas);
+  if (!raw.found) return;
+  const top = [raw.top[0] / s, raw.top[1] / s];
+  if (outOfView(top)) { track.top = null; frameOn(top, vw, vh); }
+}
 
-  if (s && s[1] - r.topSrcY > vh * 0.03) {
-    const spanY = s[1] - r.topSrcY;
-    const spanX = Math.abs(mx - s[0]);
-    const h = Math.max(spanY / 0.7, (spanX / 0.7) * vh / vw);
+/**
+ * Đặt vùng quan sát. Khi đã có điểm mặt da (và tỉ lệ), khung được tính từ
+ * điểm da + chiều dài kim nên gần như cố định, không phụ thuộc vị trí kim từng lúc.
+ */
+function frameOn(top, vw, vh) {
+  const s = skinSrc();
+  let zoom = view.zoom, cx, cy;
+
+  if (s && s[1] - top[1] > vh * 0.03) {
+    let topY = top[1];
+    if (geo.cmPerPx) {
+      topY = Math.min(topY, s[1] - 1.15 * needleLenCm / geo.cmPerPx * cosPitch());
+    }
+    topY = Math.max(0, topY);
+    const spanY = s[1] - topY;
+    const spanX = Math.abs(top[0] - s[0]);
+    const h = Math.max(spanY / 0.8, (2 * spanX / 0.8) * vh / vw);
     zoom = clamp(vh / h, 1, ZOOM_MAX);
-    cx = (mx + s[0]) / 2;
-    cy = (r.topSrcY + s[1]) / 2;
+    cx = s[0];
+    cy = (topY + s[1]) / 2;
   } else {
-    cy = my + 0.2 * vh / zoom;       // đầu kim ở ~30% từ trên, phần dưới dành cho thân kim + da
+    cx = top[0];
+    cy = top[1] + 0.3 * vh / zoom;   // đỉnh kim ở ~20% từ trên
   }
   view.zoom = zoom;
   view.cx = cx / vw; view.cy = cy / vh;
   view.mode = 'track';
-  view.hits = 0; view.misses = 0;
+  view.hits = 0; view.lost = 0;
 }
 
 btnAuto.addEventListener('click', () => setAuto(!view.auto));
@@ -401,7 +506,7 @@ zoomEl.addEventListener('input', () => {
 });
 
 btnSkin.addEventListener('click', () => {
-  if (!streaming) { alert('Hãy bật camera trước.'); return; }
+  if (!streaming) { notify('Hãy bật camera trước.'); return; }
   setTapMode(tapMode === 'skin' ? null : 'skin');
 });
 
@@ -465,23 +570,24 @@ function pickColor([u, v]) {
   const med = a => a.sort((p, q) => p - q)[a.length >> 1];
   const h0 = med(H), s0 = med(S), v0 = med(V);
 
-  const lower = [Math.round(clamp(h0 - 12, 0, 179)),
-                 Math.round(clamp(s0 - 70, 30, 255)),
-                 Math.round(clamp(v0 - 80, 40, 255))];
-  const upper = [Math.round(clamp(h0 + 12, 0, 179)), 255, 255];
+  const lower = [Math.round(clamp(h0 - 22, 0, 179)),
+                 Math.round(clamp(s0 * 0.45, 40, 255)),
+                 Math.round(clamp(v0 * 0.35, 30, 255))];
+  const upper = [Math.round(clamp(h0 + 22, 0, 179)), 255, 255];
   applyHSV(lower, upper);
   if (view.auto) setAuto(true);
 }
 
 function applyHSV(lower, upper) {
   detector.setHSVRange(lower, upper);
-  store.set('hsv', { lower, upper });
+  searchDetector.setHSVRange(lower, upper);
+  store.set('hsv2', { lower, upper });
   ['lh', 'ls', 'lv'].forEach((k, i) => { document.getElementById('hsv-' + k).value = lower[i]; });
   ['uh', 'us', 'uv'].forEach((k, i) => { document.getElementById('hsv-' + k).value = upper[i]; });
 }
 
 document.getElementById('btn-pick').addEventListener('click', () => {
-  if (!streaming) { alert('Hãy bật camera trước.'); return; }
+  if (!streaming) { notify('Hãy bật camera trước.'); return; }
   setTapMode('color');
   canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
 });
@@ -494,15 +600,15 @@ tiltEl.addEventListener('change', () => {
 
 document.getElementById('btn-tilt').addEventListener('click', async () => {
   if (typeof DeviceOrientationEvent === 'undefined') {
-    alert('Thiết bị không có cảm biến nghiêng — hãy nhập góc bằng tay.');
+    notify('Thiết bị không có cảm biến nghiêng — hãy nhập góc bằng tay.');
     return;
   }
   try {
     if (typeof DeviceOrientationEvent.requestPermission === 'function') {
       const p = await DeviceOrientationEvent.requestPermission();
-      if (p !== 'granted') { alert('Chưa được cấp quyền cảm biến chuyển động.'); return; }
+      if (p !== 'granted') { notify('Chưa được cấp quyền cảm biến chuyển động.'); return; }
     }
-  } catch (_) { alert('Không xin được quyền cảm biến.'); return; }
+  } catch (_) { notify('Không xin được quyền cảm biến.'); return; }
 
   const onOri = e => {
     if (e.beta == null) return;
@@ -513,38 +619,44 @@ document.getElementById('btn-tilt').addEventListener('click', async () => {
   };
   const timer = setTimeout(() => {
     window.removeEventListener('deviceorientation', onOri);
-    alert('Không đọc được cảm biến — hãy nhập góc bằng tay.');
+    notify('Không đọc được cảm biến — hãy nhập góc bằng tay.');
   }, 2000);
   window.addEventListener('deviceorientation', onOri);
 });
 
 document.getElementById('btn-calib').addEventListener('click', () => {
   const s = skinSrc();
-  if (!s) { alert('Hãy bấm MẶT DA và chạm vào điểm châm trước.'); return; }
-  if (!lastResult?.found) { alert('Chưa nhận diện được đầu kim.'); return; }
+  if (!s) { notify('Hãy bấm MẶT DA và chạm vào điểm châm trước.'); return; }
+  if (!lastResult?.found) { notify('Chưa nhận diện được kim.'); return; }
   const [mx, my] = lastResult.src;
   const d = Math.hypot(mx - s[0], (my - s[1]) / cosPitch());
-  if (d < 20) { alert('Đầu kim quá gần điểm mặt da — kiểm tra lại vị trí.'); return; }
-  setScale(K_CM / d);
+  if (d < 20) { notify('Đỉnh kim quá gần điểm mặt da — kiểm tra lại vị trí.'); return; }
+  setScale(needleLenCm / d);
+  // Căn lại khung một lần theo tỉ lệ mới để thấy trọn kim cả khi nhấc lên.
+  if (view.auto && !isSet && track.top) frameOn(track.top, video.videoWidth, video.videoHeight);
   applyMsg.style.color = '#3fb950';
   applyMsg.textContent = `✓ Đã hiệu chuẩn: ${geo.cmPerPx.toFixed(5)} cm/px.`;
 });
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
-function drawBBox(vertices) {
-  if (!vertices) return;
+function drawNeedle(r) {
+  if (r.fresh && r.vertices) {
+    ctx.beginPath();
+    ctx.moveTo(r.vertices[0].x, r.vertices[0].y);
+    for (let i = 1; i < 4; i++) ctx.lineTo(r.vertices[i].x, r.vertices[i].y);
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(255,68,68,0.6)';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+  }
+  const [tx, ty] = srcToCanvas(track.top[0], track.top[1]);
+  if (track.bottom) {
+    const [bx, by] = srcToCanvas(track.bottom[0], track.bottom[1]);
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(bx, by);
+    ctx.strokeStyle = '#ffd33d'; ctx.lineWidth = 2; ctx.stroke();
+  }
   ctx.beginPath();
-  ctx.moveTo(vertices[0].x, vertices[0].y);
-  for (let i = 1; i < 4; i++) ctx.lineTo(vertices[i].x, vertices[i].y);
-  ctx.closePath();
-  ctx.strokeStyle = '#ff4444';
-  ctx.lineWidth   = 2;
-  ctx.stroke();
-}
-
-function drawCenter([cx, cy]) {
-  ctx.beginPath();
-  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.arc(tx, ty, 5, 0, Math.PI * 2);
   ctx.fillStyle = '#ff4444';
   ctx.fill();
 }
@@ -568,12 +680,12 @@ function drawSkin() {
 // ── SET button ────────────────────────────────────────────────────────────────
 btnSet.addEventListener('click', () => {
   if (!lastResult?.found) {
-    alert('Chưa nhận diện được kim. Hãy hướng camera vào đầu kim.');
+    notify('Chưa nhận diện được kim. Hãy hướng camera vào đầu kim.');
     return;
   }
   const s = skinSrc();
   if (!s || !geo.cmPerPx) {
-    alert('Cần đặt MẶT DA và HIỆU CHUẨN tỉ lệ (trong Cài đặt) trước khi đo.');
+    notify('Cần đặt MẶT DA và HIỆU CHUẨN tỉ lệ (trong Cài đặt) trước khi đo.');
     return;
   }
   // Calculator giả định mặt da nằm cách đáy khung NEEDLE_D_PX → truyền "đáy khung" tương đương.
@@ -590,11 +702,11 @@ btnSet.addEventListener('click', () => {
 // ── DISPLAY button ────────────────────────────────────────────────────────────
 btnDisplay.addEventListener('click', () => {
   if (!lastResult?.found) {
-    alert('Chưa nhận diện được kim.');
+    notify('Chưa nhận diện được kim.');
     return;
   }
   if (!isSet) {
-    alert('Hãy nhấn SET VỊ TRÍ trước khi châm.');
+    notify('Hãy nhấn SET VỊ TRÍ trước khi châm.');
     return;
   }
 
@@ -634,11 +746,11 @@ btnSave.addEventListener('click', () => {
 // ── EXPORT CSV ────────────────────────────────────────────────────────────────
 btnExport.addEventListener('click', () => {
   if (!recorder.studentId) {
-    alert('Chưa có dữ liệu. Hãy nhập MSSV và thực hiện châm kim trước.');
+    notify('Chưa có dữ liệu. Hãy nhập MSSV và thực hiện châm kim trước.');
     return;
   }
   if (recorder.count === 0) {
-    alert('Chưa có lần đo nào được ghi. Nhấn HIỂN THỊ KQ sau mỗi lần châm.');
+    notify('Chưa có lần đo nào được ghi. Nhấn HIỂN THỊ KQ sau mỗi lần châm.');
     return;
   }
   recorder.downloadCSV();
@@ -725,7 +837,7 @@ async function loadChartJs() {
 
 document.getElementById('btn-chart').addEventListener('click', async () => {
   if (!recorder.studentId || recorder.count === 0) {
-    alert('Chưa có dữ liệu. Nhập MSSV, thực hiện châm kim và nhấn HIỂN THỊ KQ trước.');
+    notify('Chưa có dữ liệu. Nhập MSSV, thực hiện châm kim và nhấn HIỂN THỊ KQ trước.');
     return;
   }
   document.getElementById('chart-title').textContent =
@@ -852,6 +964,12 @@ btnApply.addEventListener('click', () => {
   if (scale !== null) setScale(scale);   // cm trên 1 pixel khung hình camera gốc
   const tilt = parseFloat(tiltEl.value);
   if (!isNaN(tilt)) setTilt(tilt);
+  const len = parseFloat(lenEl.value);
+  if (len >= 1 && len <= 20 && len !== needleLenCm) {
+    needleLenCm = len;
+    store.set('needleLen', len);
+    calculator.setNeedleLength(len);
+  }
 
   applyMsg.style.color = '#3fb950';
   applyMsg.textContent = '✓ Đã áp dụng.';
@@ -862,8 +980,9 @@ btnApply.addEventListener('click', () => {
 (function restoreSettings() {
   tiltEl.value = geo.tiltDeg;
   zoomEl.value = view.zoom;
-  const hsv = store.get('hsv', null);
+  const hsv = store.get('hsv2', null);
   if (hsv && hsv.lower && hsv.upper) applyHSV(hsv.lower, hsv.upper);
-  const saved = store.get('scale', null);
+  lenEl.value = needleLenCm;
+  const saved = store.get('scale2', null);
   if (saved && saved.cmPerPx > 0) scaleEl.value = saved.cmPerPx.toFixed(5);
 })();

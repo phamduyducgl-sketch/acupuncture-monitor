@@ -18,6 +18,8 @@ class NeedleCalculator {
   constructor(pixelToCm = PIXEL_TO_CM, frameInterval = FRAME_INTERVAL_S) {
     this.pixelToCm     = pixelToCm;
     this.frameInterval = frameInterval;
+    this.kPx     = NEEDLE_K_PX;      // điểm theo dõi → mũi kim (pixel chuẩn)
+    this.totalCm = NEEDLE_TOTAL_CM;  // tổng chiều dài kim (cm)
     this._reset();
   }
 
@@ -41,7 +43,7 @@ class NeedleCalculator {
     } else {
       const L = canhVuong / Math.sin(radian);
       const D = NEEDLE_D_PX / Math.sin(radian);
-      this._spacePx = Math.abs(Math.round(L * 10) / 10 - NEEDLE_K_PX - Math.round(D * 10) / 10);
+      this._spacePx = Math.abs(Math.round(L * 10) / 10 - this.kPx - Math.round(D * 10) / 10);
     }
 
     this._isSet = true;
@@ -88,12 +90,18 @@ class NeedleCalculator {
       velocityHistory: [...this._velHist],
       distanceHistory: [...this._distHist],
       lengthCm:        len,
-      remainingCm:     this._round1(NEEDLE_TOTAL_CM - len),
+      remainingCm:     this._round1(this.totalCm - len),
       angleDeg:        angleDeg,
     };
   }
 
   reset() { this._reset(); }
+
+  /** Đặt chiều dài kim từ điểm theo dõi (đỉnh cán) tới mũi kim, tính bằng cm. */
+  setNeedleLength(cm) {
+    this.kPx     = cm / this.pixelToCm;
+    this.totalCm = cm;
+  }
 
   /** Cập nhật tỉ lệ pixel/cm khi dùng camera khác. */
   setPixelScale(pixelToCm) { this.pixelToCm = pixelToCm; }

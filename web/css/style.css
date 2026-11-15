@@ -63,7 +63,20 @@ header h1 { font-size: 1rem; font-weight: 600; color: #e6edf3; }
   background: rgba(218,54,51,0.88); color: #fff;
   pointer-events: none;
 }
-.overlay-pill.set-ok { background: rgba(35,134,54,0.9); }
+.overlay-pill.set-ok {
+  background: rgba(35,134,54,0.9);
+  top: 10px; bottom: auto; left: auto; right: 10px; transform: none;
+}
+.toast {
+  position: fixed; left: 50%; bottom: 24px; z-index: 200;
+  transform: translateX(-50%);
+  max-width: min(92vw, 420px); padding: 10px 16px;
+  border-radius: 12px; font-size: 0.85rem; line-height: 1.4;
+  background: rgba(30,36,44,0.96); color: #fff;
+  border: 1px solid var(--accent);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  white-space: pre-line; text-align: center;
+}
 .overlay-pill.tap-hint {
   top: 10px; bottom: auto; white-space: nowrap;
   background: rgba(31,111,235,0.92);
