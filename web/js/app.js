@@ -39,6 +39,8 @@ const HOLD_FRAMES = 10;    // số khung giữ kết quả cũ khi mất dấu t
 const REST_MS     = 1000;  // kim đứng yên bao lâu thì chốt kết quả
 const REST_RANGE  = 0.06;  // dao động độ sâu tối đa (cm) vẫn coi là đứng yên
 const MIN_DEPTH   = 0.15;  // độ sâu tối thiểu (cm) để tính là một lần châm
+const EMA_TAU     = 0.15;  // hằng số thời gian làm mượt số hiển thị (giây) — theo thời gian, không theo số khung
+const HIST_MS     = 20000; // giữ mẫu độ sâu thô bao lâu để tính tốc độ châm
 
 const detector       = new NeedleDetector();
 const searchDetector = new NeedleDetector();   // dò ngầm toàn khung khi mất dấu
@@ -69,15 +71,18 @@ const view = {
   auto: true, hits: 0, lost: 0,
 };
 const geo = {
-  tiltDeg: clamp(store.get('tilt', 75), 20, 90),  // góc nghiêng điện thoại so với mặt bàn
-  cmPerPx: null,                                  // cm trên 1 pixel khung gốc
+  tiltDeg: clamp(store.get('tilt', 60), 20, 90),  // góc nghiêng điện thoại so với mặt bàn
+  rollDeg: clamp(store.get('roll', 0), -20, 20),  // nghiêng ngang trái/phải (từ cảm biến)
+  fovDeg:  clamp(store.get('fov', 63), 30, 130),  // góc nhìn camera theo cạnh dài khung hình
+  dist:    store.get('dist', null),               // khoảng cách camera → điểm châm (cm), từ hiệu chuẩn
   skin:   store.get('skin', null),                // điểm châm trên da {fx, fy}
   region: store.get('region', null),              // vùng tìm kim {x0, y0, x1, y1} (tỉ lệ 0–1)
 };
 let roi = { x: 0, y: 0, w: 1, h: 1 };
 const track  = { top: null, bottom: null, dir: null, deg: 90, misses: 0 };
 const live   = { ema: null, shown: null, vel: 0, lastT: 0 };
-const att    = { phase: 'ready', buf: [], path: [], tZero: 0 };
+const att    = { phase: 'ready', buf: [], hist: [] };
+let poseNow  = null;       // tư thế kim của khung hiện tại (Geo.pose) hoặc null
 const vwatch = { t: -1, since: 0, seen: false, tried: false, busy: false };
 const opts   = { flash: store.get('optFlash', true), voice: store.get('optVoice', false) };
 let session  = store.get('session', null);   // {id, start, end, records: [{n, t, depth, speed, angle}]}
@@ -91,7 +96,7 @@ const tapHint = $('tap-hint'), noDetect = $('no-detect'), flashEl = $('flash');
 const liveEl = $('live'), lastEl = $('last');
 const btnPractice = $('btn-practice'), btnLast = $('btn-last');
 const camSelect = $('cam-select'), camInfo = $('cam-info');
-const tiltEl = $('tilt'), scaleEl = $('px-scale'), lenEl = $('needle-len');
+const tiltEl = $('tilt'), distEl = $('cam-dist'), fovEl = $('fov'), lenEl = $('needle-len');
 
 // ── OpenCV ────────────────────────────────────────────────────────────────────
 // @techstark/opencv-js trả về Promise — resolve để lấy module thực
@@ -109,8 +114,10 @@ function onOpenCvError() {
 }
 
 // ── Hình học ──────────────────────────────────────────────────────────────────
-/** Hệ số co ngắn theo chiều dọc ảnh do camera nhìn chúc xuống. */
-function cosPitch() { return Math.max(0.2, Math.sin(geo.tiltDeg * Math.PI / 180)); }
+/** Mô hình camera lỗ kim cho khung hình hiện tại (xem geometry.js). */
+function cam() {
+  return Geo.camera(video.videoWidth, video.videoHeight, geo.fovDeg, geo.tiltDeg, geo.rollDeg);
+}
 function canvasToSrc(u, v) {
   return [roi.x + u * roi.w / canvas.width, roi.y + v * roi.h / canvas.height];
 }
@@ -129,49 +136,30 @@ function regionCanvas() {
   const b = srcToCanvas(geo.region.x1 * vw, geo.region.y1 * vh);
   return [a[0], a[1], b[0], b[1]];
 }
-/** Góc kim so với mặt da, bù co ngắn chiều dọc. */
-function correctAngle(inclineDeg) {
-  if (inclineDeg >= 89.5) return 90;
-  return Math.atan(Math.tan(inclineDeg * Math.PI / 180) / cosPitch()) * 180 / Math.PI;
-}
-/** Mũi kim dự đoán = đỉnh cán + chiều dài kim dọc theo hướng thân kim (đã bù nghiêng). */
-function tipSrc() {
-  if (!geo.cmPerPx || !track.top || !track.dir) return null;
-  const [dx, dy] = track.dir;
-  const t = needleLenCm / (geo.cmPerPx * Math.hypot(dx, dy / cosPitch()));
-  return [track.top[0] + dx * t, track.top[1] + dy * t];
-}
 /**
- * Độ sâu = phần thân kim nằm dưới đường mặt da, đo dọc theo kim.
- * Kim gần nằm ngang (<10°) thì dùng: chiều dài kim − khoảng cách đỉnh kim → điểm châm.
+ * Tư thế kim khung hiện tại: độ sâu (phần kim dưới mặt da, đo dọc theo kim), góc, mũi kim dự đoán.
+ * Cần điểm mặt da + hiệu chuẩn; thiếu thì trả null.
  */
-function depthRaw() {
+function computePose() {
   const s = skinSrc();
-  if (!s || !geo.cmPerPx || !track.top) return null;
-  const cp  = cosPitch();
-  const tip = tipSrc();
-  let depth;
-  if (tip) {
-    const rx = track.dir[0], ry = track.dir[1] / cp;
-    const sinA = ry / (Math.hypot(rx, ry) || 1);
-    if (sinA > 0.17) depth = (tip[1] - s[1]) / cp * geo.cmPerPx / sinA;
-  }
-  if (depth === undefined) {
-    const d = Math.hypot(track.top[0] - s[0], (track.top[1] - s[1]) / cp) * geo.cmPerPx;
-    depth = needleLenCm - d;
-  }
-  return clamp(depth, 0, needleLenCm);
+  if (!s || !geo.dist || !track.top || !track.dir) return null;
+  return Geo.pose(cam(), s, geo.dist, track.top, track.dir, needleLenCm);
 }
 
-function setScale(cmPerPx, persist = true) {
-  geo.cmPerPx = cmPerPx;
-  scaleEl.value = cmPerPx ? cmPerPx.toFixed(5) : '';
-  if (persist && cmPerPx && video.videoWidth) store.set('scale2', { cmPerPx, w: video.videoWidth });
+function setDist(cm, persist = true) {
+  geo.dist = cm > 0 ? cm : null;
+  distEl.value = geo.dist ? geo.dist.toFixed(1) : '';
+  if (persist) store.set('dist', geo.dist);
+  live.ema = null; resetAttempt();
 }
 function setTilt(deg) {
   geo.tiltDeg = clamp(deg, 20, 90);
   tiltEl.value = geo.tiltDeg;
   store.set('tilt', geo.tiltDeg);
+}
+function setRoll(deg) {
+  geo.rollDeg = clamp(deg, -20, 20);
+  store.set('roll', geo.rollDeg);
 }
 function setAuto(on) {
   view.auto = on;
@@ -323,9 +311,6 @@ async function recoverCamera() {
 function onSourceSize(vw, vh) {
   srcW = vw;
   camInfo.textContent = `${camInfo.dataset.label || 'camera'} · ${vw}×${vh} · lấy nét: ${focusInfo}`;
-  // Tỉ lệ đã hiệu chuẩn được lưu kèm bề rộng khung → quy đổi nếu độ phân giải khác.
-  const saved = store.get('scale2', null);
-  if (saved && saved.cmPerPx > 0 && saved.w > 0) setScale(saved.cmPerPx * saved.w / vw, false);
 }
 
 // ── Vòng lặp khung hình ───────────────────────────────────────────────────────
@@ -367,8 +352,8 @@ function trackUpdate(raw) {
       d = [d[0] / m, d[1] / m];
     }
     track.dir = d;
-    const deg = correctAngle(raw.incline);
-    track.deg = cont ? track.deg + a * (deg - track.deg) : deg;
+    const deg = Geo.angleOnly(cam(), track.top, track.dir);
+    if (deg !== null) track.deg = cont ? track.deg + a * (deg - track.deg) : deg;
     track.misses = 0;
   } else {
     track.misses++;
@@ -402,6 +387,7 @@ function frameStep() {
 
       drawRegion();
       drawSkin();
+      poseNow = r.found ? computePose() : null;
       if (r.found) {
         drawNeedle();
         updateLive(now, dt);
@@ -423,11 +409,11 @@ function frameStep() {
 
 // ── Số đo hiện tại (bên trái), đã làm mượt ────────────────────────────────────
 /**
- * Làm mượt theo thời gian, chỉ đổi số khi lệch đủ 0,1 cm và tối đa 4 lần/giây
- * để kim rung không làm số nhảy.
+ * Làm mượt theo thời gian thực (không theo số khung, để máy chậm hay nhanh đều trễ như nhau),
+ * chỉ đổi số khi lệch đủ ~0,1 cm và tối đa 4 lần/giây để kim rung không làm số nhảy.
  */
 function updateLive(now, dt) {
-  const d = depthRaw();
+  const d = poseNow ? poseNow.depth : null;
   if (d === null) {                      // chưa đặt mặt da / chưa hiệu chuẩn → chỉ hiện góc
     live.ema = null; live.shown = null;
     if (now - live.lastT >= 250) {
@@ -443,8 +429,9 @@ function updateLive(now, dt) {
     live.ema = d; live.vel = 0;
   } else {
     const prev = live.ema;
-    live.ema += 0.25 * (d - live.ema);
-    live.vel += 0.2 * (Math.abs(live.ema - prev) / dt - live.vel);
+    const k = 1 - Math.exp(-dt / EMA_TAU);
+    live.ema += k * (d - live.ema);
+    live.vel += k * (Math.abs(live.ema - prev) / dt - live.vel);
   }
   if (now - live.lastT < 250) return;
   live.lastT = now;
@@ -453,28 +440,32 @@ function updateLive(now, dt) {
   }
   $('live-depth').textContent = live.shown.toFixed(1);
   $('live-speed').textContent = (live.vel < 0.15 ? 0 : live.vel).toFixed(1);
-  $('live-angle').textContent = Math.round(track.deg);
+  $('live-angle').textContent = Math.round(poseNow.angle);
   liveEl.style.display = 'block';
 }
 
 // ── Tự chốt kết quả khi kim đứng yên ──────────────────────────────────────────
-function resetAttempt() { att.phase = 'ready'; att.buf = []; att.path = []; }
+function resetAttempt() { att.phase = 'ready'; att.buf = []; att.hist = []; }
 
 /**
  * ready  → kim còn ở ngoài da.
  * moving → kim đã qua mặt da và đang di chuyển; đứng yên REST_MS thì chốt.
  * done   → đã chốt; chờ rút kim ra (độ sâu về 0) để sẵn sàng cho lần sau.
+ *
+ * Chuyển pha dựa trên số đã làm mượt (chống nhiễu). Giá trị CHỐT lấy trung vị các mẫu THÔ
+ * trong giây đứng yên; tốc độ tính từ mẫu thô (xem Geo.strokeSpeed) vì số làm mượt đến trễ.
  */
 function attemptStep(now) {
   const d = live.ema;
-  if (d === null) return;
+  if (d === null || !poseNow) return;
 
-  att.buf.push({ t: now, d });
+  att.hist.push({ t: now, d: poseNow.depth });
+  while (att.hist.length > 2 && now - att.hist[0].t > HIST_MS) att.hist.shift();
+  att.buf.push({ t: now, d, raw: poseNow.depth, ang: poseNow.angle });
   while (att.buf.length > 1 && now - att.buf[1].t >= REST_MS) att.buf.shift();
-  if (d <= 0.05) att.tZero = now;
 
   if (att.phase === 'ready') {
-    if (d > MIN_DEPTH) { att.phase = 'moving'; att.path = [{ t: att.tZero || now, d: 0 }]; }
+    if (d > MIN_DEPTH) att.phase = 'moving';
     return;
   }
   if (att.phase === 'done') {
@@ -482,27 +473,28 @@ function attemptStep(now) {
     return;
   }
   // moving
-  att.path.push({ t: now, d });
   if (d <= 0.05) { att.phase = 'ready'; return; }
-  if (att.buf.length < 8 || now - att.buf[0].t < REST_MS) return;
+  if (att.buf.length < 5 || now - att.buf[0].t < REST_MS) return;
   let lo = Infinity, hi = -Infinity;
   for (const s of att.buf) { if (s.d < lo) lo = s.d; if (s.d > hi) hi = s.d; }
   if (hi - lo >= REST_RANGE) return;
 
-  // Tốc độ trung bình: từ lúc mũi kim qua mặt da đến lúc đạt 95% độ sâu cuối.
-  const reach = att.path.find(p => p.d >= 0.95 * d) || att.path[att.path.length - 1];
-  const dur   = (reach.t - att.path[0].t) / 1000;
+  const depth = Geo.median(att.buf.map(s => s.raw));
+  if (depth < MIN_DEPTH) return;
+  const sp = Geo.strokeSpeed(att.hist, depth);
   att.phase = 'done';
   report({
-    depth: Math.round(d * 10) / 10,
-    speed: dur > 0.05 ? Math.round(d / dur * 10) / 10 : 0,
-    angle: Math.round(track.deg),
+    depth: Math.round(depth * 10) / 10,
+    speed: sp ? Math.round(sp.speed * 10) / 10 : null,   // null = không đo được (tay che kim lúc đâm)
+    angle: Math.round(Geo.median(att.buf.map(s => s.ang))),
   });
 }
 
+const fmtSpeed = v => v == null ? '—' : v.toFixed(1);
+
 function report(res) {
   $('val-len').textContent   = res.depth.toFixed(1);
-  $('val-avg').textContent   = res.speed.toFixed(1);
+  $('val-avg').textContent   = fmtSpeed(res.speed);
   $('val-angle').textContent = res.angle;
   lastEl.style.display = 'block';
 
@@ -513,7 +505,7 @@ function report(res) {
   updatePracticeUI();
 
   if (opts.flash) {
-    flashEl.innerHTML = `<b>${res.depth.toFixed(1)} cm</b><span>${res.speed.toFixed(1)} cm/s · ${res.angle}°</span>`;
+    flashEl.innerHTML = `<b>${res.depth.toFixed(1)} cm</b><span>${fmtSpeed(res.speed)} cm/s · ${res.angle}°</span>`;
     flashEl.style.display = 'block';
     clearTimeout(report._t);
     report._t = setTimeout(() => { flashEl.style.display = 'none'; }, 2500);
@@ -608,7 +600,8 @@ function frameOn(top, vw, vh) {
   let zoom = view.zoom, cx, cy;
   if (s && s[1] - top[1] > vh * 0.03) {
     let topY = top[1];
-    if (geo.cmPerPx) topY = Math.min(topY, s[1] - 1.15 * needleLenCm / geo.cmPerPx * cosPitch());
+    const hi = geo.dist ? Geo.aboveSkinPx(cam(), s, geo.dist, 1.15 * needleLenCm) : null;
+    if (hi) topY = Math.min(topY, hi[1]);
     topY = Math.max(0, topY);
     const spanY = s[1] - topY;
     const spanX = Math.abs(top[0] - s[0]);
@@ -705,7 +698,9 @@ canvas.addEventListener('click', e => {
     geo.skin = { fx: x / vw, fy: y / vh };
     store.set('skin', geo.skin);
     setTapMode(null);
-    live.ema = null; resetAttempt();
+    // Điểm châm mới ở khoảng cách khác → tỉ lệ cũ không còn đúng, buộc hiệu chuẩn lại.
+    if (geo.dist) notify('Đã đổi điểm châm — hãy HIỆU CHUẨN lại (mũi kim chạm da tại chấm xanh).');
+    setDist(null);
     if (view.auto) setAuto(true);          // căn lại khung theo điểm da mới
   } else if (att.phase !== 'moving') {
     view.cx = x / vw; view.cy = y / vh;    // chạm để dời tâm
@@ -719,27 +714,43 @@ $('btn-calib').addEventListener('click', () => {
   const s = skinSrc();
   if (!s) { notify('Hãy bấm MẶT DA và chạm vào điểm châm trước.'); return; }
   if (!track.top || track.misses > HOLD_FRAMES) { notify('Chưa nhận diện được kim.'); return; }
-  const d = Math.hypot(track.top[0] - s[0], (track.top[1] - s[1]) / cosPitch());
-  if (d < 20) { notify('Đỉnh kim quá gần điểm mặt da — kiểm tra lại vị trí.'); return; }
-  setScale(needleLenCm / d);
-  live.ema = null; resetAttempt();
+  if (Math.hypot(track.top[0] - s[0], track.top[1] - s[1]) < 20) {
+    notify('Đỉnh kim quá gần điểm mặt da — kiểm tra lại vị trí.'); return;
+  }
+  const c = Geo.calibrate(cam(), s, track.top, needleLenCm);
+  if (!c || !(c.dist > 3 && c.dist < 300)) { notify('Không hiệu chuẩn được — kiểm tra góc nghiêng máy và điểm mặt da.'); return; }
+  setDist(c.dist);
   // Căn lại khung một lần theo tỉ lệ mới để thấy trọn kim cả khi nhấc lên.
   if (view.auto) frameOn(track.top, video.videoWidth, video.videoHeight);
-  notify(`Đã hiệu chuẩn: ${geo.cmPerPx.toFixed(5)} cm/px.\nVòng tròn vàng phải trùng mũi kim thật.`);
+  notify(`Đã hiệu chuẩn: camera cách điểm châm ${c.dist.toFixed(1)} cm (đo thước để đối chiếu).` +
+         (c.angle < 83 ? `\n⚠ Kim đang nghiêng ${Math.round(90 - c.angle)}° — giữ kim thẳng đứng rồi hiệu chuẩn lại.`
+                       : '\nVòng tròn vàng phải trùng mũi kim thật.'));
 });
 
+// Đổi góc máy / góc nhìn làm thay đổi mô hình camera → hiệu chuẩn cũ không còn khớp.
+function geometryChanged() {
+  if (geo.dist) notify('Đã đổi thông số camera — hãy HIỆU CHUẨN lại.');
+  setDist(null);
+}
 tiltEl.addEventListener('change', () => {
   const v = parseFloat(tiltEl.value);
-  setTilt(isNaN(v) ? geo.tiltDeg : v);
+  if (isNaN(v)) { tiltEl.value = geo.tiltDeg; return; }
+  setTilt(v); setRoll(0);                  // nhập tay: coi như máy cân ngang
+  geometryChanged();
+});
+fovEl.addEventListener('change', () => {
+  const v = parseFloat(fovEl.value);
+  if (v >= 30 && v <= 130) { geo.fovDeg = v; store.set('fov', v); geometryChanged(); }
+  fovEl.value = geo.fovDeg;
 });
 lenEl.addEventListener('change', () => {
   const v = parseFloat(lenEl.value);
-  if (v >= 1 && v <= 20) { needleLenCm = v; store.set('needleLen', v); }
+  if (v >= 1 && v <= 20 && v !== needleLenCm) { needleLenCm = v; store.set('needleLen', v); geometryChanged(); }
   lenEl.value = needleLenCm;
 });
-scaleEl.addEventListener('change', () => {
-  const v = parseFloat(scaleEl.value);
-  if (v > 0) setScale(v); else scaleEl.value = geo.cmPerPx ? geo.cmPerPx.toFixed(5) : '';
+distEl.addEventListener('change', () => {
+  const v = parseFloat(distEl.value);
+  if (v > 3 && v < 300) setDist(v); else distEl.value = geo.dist ? geo.dist.toFixed(1) : '';
 });
 
 $('btn-tilt').addEventListener('click', async () => {
@@ -760,7 +771,10 @@ $('btn-tilt').addEventListener('click', async () => {
     clearTimeout(timer);
     const b = Math.abs(e.beta);              // máy dựng đứng = 90°, nằm ngửa = 0°
     setTilt(Math.round(b > 90 ? 180 - b : b));
-    notify(`Góc nghiêng máy: ${geo.tiltDeg}°`);
+    const g = e.gamma == null || Math.abs(e.gamma) > 20 ? 0 : e.gamma;   // nghiêng ngang (máy cầm dọc)
+    setRoll(Math.round(g * 10) / 10);
+    geometryChanged();
+    notify(`Góc nghiêng máy: ${geo.tiltDeg}° · lệch ngang ${geo.rollDeg}°\nHãy HIỆU CHUẨN lại.`);
   };
   const timer = setTimeout(() => {
     window.removeEventListener('deviceorientation', onOri);
@@ -813,7 +827,7 @@ function drawSkin() {
 /** Đỉnh kim (chấm đỏ), thân kim (đường vàng) và mũi kim dự đoán (vòng tròn vàng). */
 function drawNeedle() {
   const [tx, ty] = srcToCanvas(track.top[0], track.top[1]);
-  const tip = tipSrc();
+  const tip = poseNow ? poseNow.tipPx : null;
   const end = tip || track.bottom;       // chưa hiệu chuẩn → chỉ vẽ phần nhìn thấy
   if (end) {
     const [ex, ey] = srcToCanvas(end[0], end[1]);
@@ -856,7 +870,7 @@ btnPractice.addEventListener('click', () => {
   if (!id)             { notify('Hãy nhập MSSV ở góc trên trái trước.'); stuId.focus(); return; }
   if (!streaming)      { notify('Hãy bật camera trước.'); return; }
   if (!geo.skin)       { notify('Hãy bấm MẶT DA và chạm vào điểm châm trước.'); return; }
-  if (!geo.cmPerPx)    { notify('Hãy HIỆU CHUẨN trước (mũi kim chạm da tại chấm xanh).'); return; }
+  if (!geo.dist)       { notify('Hãy HIỆU CHUẨN trước (mũi kim chạm da tại chấm xanh).'); return; }
   unlockAudio();
   store.set('mssv', id);
   session = { id, start: new Date().toISOString(), end: null, records: [] };
@@ -909,12 +923,19 @@ function renderResults() {
 
   METRICS.forEach((m, i) => {
     const y0 = top + i * (PH + 40);
-    const vals = recs.map(r => r[m.key]);
-    const st = stats(vals);
+    const vals  = recs.map(r => r[m.key]);
+    const valid = vals.filter(v => v != null);
     const L = 110, R = W - 50, T = y0 + 70, B = y0 + PH - 40;
 
     g.fillStyle = '#1f2328'; g.font = 'bold 32px -apple-system, Arial, sans-serif';
+    g.textAlign = 'left';
     g.fillText(`${m.name} (${m.unit})`, 50, y0 + 38);
+    if (!valid.length) {
+      g.fillStyle = '#57606a'; g.font = '28px -apple-system, Arial, sans-serif';
+      g.fillText('Không đo được (kim bị che trong lúc đâm).', 50, y0 + 110);
+      return;
+    }
+    const st = stats(valid);
     g.fillStyle = '#57606a'; g.font = '28px -apple-system, Arial, sans-serif';
     g.textAlign = 'right';
     g.fillText(`TB ${st.mean.toFixed(2)} ± ${st.sd.toFixed(2)}   ·   ${st.min}–${st.max}`, R, y0 + 38);
@@ -944,10 +965,15 @@ function renderResults() {
     g.setLineDash([]); g.globalAlpha = 1;
 
     g.lineWidth = 3; g.beginPath();
-    vals.forEach((v, k) => { if (k) g.lineTo(X(k), Y(v)); else g.moveTo(X(k), Y(v)); });
+    let pen = false;                                   // lần không đo được → ngắt đường nối
+    vals.forEach((v, k) => {
+      if (v == null) { pen = false; return; }
+      if (pen) g.lineTo(X(k), Y(v)); else g.moveTo(X(k), Y(v));
+      pen = true;
+    });
     g.stroke();
     g.fillStyle = m.color;
-    vals.forEach((v, k) => { g.beginPath(); g.arc(X(k), Y(v), 7, 0, Math.PI * 2); g.fill(); });
+    vals.forEach((v, k) => { if (v != null) { g.beginPath(); g.arc(X(k), Y(v), 7, 0, Math.PI * 2); g.fill(); } });
   });
 }
 
@@ -956,7 +982,7 @@ function buildCSV() {
     ['MSSV', session.id], ['Bắt đầu', fmtTime(session.start)],
     ['Kết thúc', session.end ? fmtTime(session.end) : ''], [],
     ['Lần', 'Thời điểm', 'Độ sâu (cm)', 'Tốc độ (cm/s)', 'Góc kim (độ)'],
-    ...session.records.map(r => [r.n, fmtTime(r.t), r.depth, r.speed, r.angle]),
+    ...session.records.map(r => [r.n, fmtTime(r.t), r.depth, r.speed ?? '', r.angle]),
   ];
   const esc = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
   return '﻿' + rows.map(r => r.map(esc).join(',')).join('\r\n');   // BOM để Excel đọc đúng tiếng Việt
@@ -965,7 +991,9 @@ function summaryText() {
   const lines = [`Kết quả luyện tập châm kim — MSSV ${session.id}`,
                  `${fmtTime(session.start)} · ${session.records.length} lần châm`];
   METRICS.forEach(m => {
-    const st = stats(session.records.map(r => r[m.key]));
+    const vals = session.records.map(r => r[m.key]).filter(v => v != null);
+    if (!vals.length) { lines.push(`${m.name}: không đo được`); return; }
+    const st = stats(vals);
     lines.push(`${m.name}: TB ${st.mean.toFixed(2)} ± ${st.sd.toFixed(2)} ${m.unit} (${st.min}–${st.max})`);
   });
   return lines.join('\n');
@@ -1029,8 +1057,8 @@ document.querySelectorAll('.modal').forEach(m => {
   zoomEl.value = view.zoom;
   $('opt-flash').checked = opts.flash;
   $('opt-voice').checked = opts.voice;
-  const saved = store.get('scale2', null);
-  if (saved && saved.cmPerPx > 0) scaleEl.value = saved.cmPerPx.toFixed(5);
+  fovEl.value  = geo.fovDeg;
+  distEl.value = geo.dist ? geo.dist.toFixed(1) : '';
   setTapMode(null);
   updatePracticeUI();
   // Lần đầu dùng: mở hướng dẫn.

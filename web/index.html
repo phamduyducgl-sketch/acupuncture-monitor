@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Acupuncture Monitor</title>
-  <link rel="stylesheet" href="css/style.css?v=11">
+  <link rel="stylesheet" href="css/style.css?v=12">
 </head>
 <body>
 
@@ -87,7 +87,7 @@
       <div class="set-title">Hình học</div>
       <div class="set-row">
         <span class="set-label">Góc nghiêng máy (độ)</span>
-        <input id="tilt" class="set-input narrow" type="number" min="20" max="90" step="1" value="75">
+        <input id="tilt" class="set-input narrow" type="number" min="20" max="90" step="1" value="60">
         <button id="btn-tilt" class="chip">ĐO</button>
       </div>
       <div class="set-row">
@@ -95,9 +95,15 @@
         <input id="needle-len" class="set-input narrow" type="number" step="0.1" min="1" max="20" value="5.1">
       </div>
       <div class="set-row">
-        <span class="set-label">Tỉ lệ (cm/px)</span>
-        <input id="px-scale" class="set-input narrow" type="number" step="0.0001" min="0.0001" max="1" placeholder="chưa có">
+        <span class="set-label">Camera → điểm châm (cm)</span>
+        <input id="cam-dist" class="set-input narrow" type="number" step="0.1" min="3" max="300" placeholder="chưa có">
       </div>
+      <div class="set-row">
+        <span class="set-label">Góc nhìn camera (độ)</span>
+        <input id="fov" class="set-input narrow" type="number" step="1" min="30" max="130" value="63">
+      </div>
+      <div class="set-note">Khoảng cách do HIỆU CHUẨN tính ra; đo bằng thước từ ống kính tới chấm xanh để đối chiếu.
+        Nếu lệch quá 10% thì chỉnh Góc nhìn camera (ống kính chính iPhone ≈ 63°) rồi hiệu chuẩn lại.</div>
 
       <div class="set-title">Báo kết quả khi kim đứng yên 1 giây</div>
       <label class="set-check"><input id="opt-flash" type="checkbox" checked> Hiện số lớn trên màn hình</label>
@@ -138,7 +144,11 @@
         </ol>
         <h4>Lưu ý</h4>
         <ul>
-          <li>Làm lại HIỆU CHUẨN khi đổi khoảng cách, góc giá đỡ hoặc loại kim.</li>
+          <li>Làm lại HIỆU CHUẨN khi đổi khoảng cách, góc giá đỡ, điểm châm hoặc loại kim.</li>
+          <li>Một camera không thấy được chiều trước–sau: đâm lệch chấm xanh về phía gần/xa máy 1 cm, hoặc kim ngả
+              về phía máy 10°, làm độ sâu sai 3–4 mm khi máy nghiêng 60°. Dựng máy càng đứng (80–85°) và kê tấm da
+              lên ngang tầm ống kính thì sai số này giảm còn khoảng 1 mm.</li>
+          <li>Tốc độ hiện “—” khi tay che kim trong lúc đâm nên không đủ dữ liệu.</li>
           <li>Khi ngón tay che đỉnh cán kim, số đo tạm thời không chính xác; kết quả chỉ được chốt khi kim đứng yên.</li>
         </ul>
       </div>
@@ -164,8 +174,9 @@
   <div id="toast" class="toast" style="display:none" role="status"></div>
 
   <!-- ── Scripts ── -->
-  <script src="js/needle_detector.js?v=11"></script>
-  <script src="js/app.js?v=11"></script>
+  <script src="js/geometry.js?v=12"></script>
+  <script src="js/needle_detector.js?v=12"></script>
+  <script src="js/app.js?v=12"></script>
   <!-- OpenCV tải sau app.js để hàm onOpenCvScriptLoaded luôn tồn tại khi onload chạy -->
   <script async
     src="js/opencv.js"
