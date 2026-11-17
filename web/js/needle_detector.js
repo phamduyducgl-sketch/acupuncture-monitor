@@ -101,7 +101,6 @@ class NeedleDetector {
         if (uy < sinMin) continue;
         segs.push({ x1, y1, x2, y2, len, ux, uy, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 });
       }
-      if (!segs.length && !(hint && hintDir)) return result;
 
       // ── Kiểm chứng từng ứng viên bằng cách dò mặt cắt trên ảnh gốc ──
       // Đoạn Hough chỉ là "hạt giống". Kim thật là một vệt mảnh HAI PHÍA đều là nền, thẳng tắp và dài;
@@ -114,7 +113,7 @@ class NeedleDetector {
       const tried = [];
 
       // Hạt giống đầu tiên: vị trí và hướng kim ở khung trước (nếu có) — giữ được kim khi tay làm mất đoạn Hough.
-      const seeds = segs.slice(0, 12);
+      const seeds = [...segs.slice(0, 8), ...this._scanSeeds(src, bounds, sinMin)];
       if (hint && hintDir) {
         const L = Math.max(0.08 * H, hintLen || 0);          // cả chiều dài kim ở khung trước
         seeds.unshift({ mx: hint[0] + hintDir[0] * L / 2, my: hint[1] + hintDir[1] * L / 2, ux: hintDir[0], uy: hintDir[1], len: L });
@@ -176,6 +175,57 @@ class NeedleDetector {
   }
 
   /**
+   * Hạt giống không phụ thuộc Hough: quét các hàng ngang cách đều, tìm điểm là "vệt mảnh" (khác nền ở cả
+   * hai bên), rồi thử các hướng quanh phương thẳng đứng để lấy hướng mà vệt kéo dài rõ nhất.
+   * Kim rõ nhưng ngưỡng nhị phân/Hough bỏ sót (nền thay đổi, kim hơi nhoè) vẫn được tìm thấy ở bước này.
+   */
+  _scanSeeds(src, bounds, sinMin) {
+    const d = src.data, W = src.cols, H = src.rows;
+    const [X0, Y0, X1, Y1] = bounds;
+    const T = this.minContrast * 0.8 * 4;                  // theo đơn vị của lum (tổng trọng số 4)
+    const val = (x, y, c) => { const j = (y * W + x) * 4; return c ? 4 * (d[j] - d[j + 2]) : d[j] + 2 * d[j + 1] + d[j + 2]; };
+    const ridge = (x, y) => {
+      if (x < 7 || y < 0 || x >= W - 7 || y >= H) return 0;
+      let best = 0;
+      for (let c = 0; c < 2; c++) {
+        const v = val(x, y, c);
+        for (const k of [3, 6]) {
+          const l = val(x - k, y, c), r = val(x + k, y, c);
+          if (Math.sign(l - v) === Math.sign(r - v)) best = Math.max(best, Math.min(Math.abs(l - v), Math.abs(r - v)));
+        }
+      }
+      return best;
+    };
+    const angles = [];
+    for (let a = -45; a <= 45; a += 5) {
+      const dx = Math.sin(a * Math.PI / 180), dy = Math.cos(a * Math.PI / 180);
+      if (dy >= sinMin - 1e-6) angles.push([dx, dy]);
+    }
+    const cands = [];
+    const stepY = Math.max(6, Math.round(0.035 * H));
+    for (let y = Math.max(Y0, 14) + (stepY >> 1); y < Math.min(Y1, H - 14); y += stepY) {
+      for (let x = Math.max(X0, 8); x < Math.min(X1, W - 8); x++) {
+        const s0 = ridge(x, y);
+        if (s0 < T || s0 < ridge(x - 1, y) || s0 <= ridge(x + 1, y)) continue;     // cực đại cục bộ theo x
+        let bestS = 0, bestA = null;
+        for (const [dx, dy] of angles) {
+          let sum = 0, hits = 0;
+          for (let j = -12; j <= 12; j += 2) {
+            const px = Math.round(x + dx * j), py = Math.round(y + dy * j);
+            // cho lệch ±1 px vì hướng thử thô 5°
+            const v = Math.max(ridge(px, py), ridge(px - 1, py), ridge(px + 1, py));
+            if (v >= T) { sum += v; hits++; }
+          }
+          if (hits >= 11 && sum > bestS) { bestS = sum; bestA = [dx, dy]; }
+        }
+        if (bestA) cands.push({ mx: x, my: y, ux: bestA[0], uy: bestA[1], s: bestS });
+      }
+    }
+    cands.sort((a, b) => b.s - a.s);
+    return cands.slice(0, 16);
+  }
+
+  /**
    * Dò cả cây kim theo các mặt cắt ngang trục, từ một điểm trên kim đi về hai phía.
    * Mỗi mặt cắt: trừ nền từng kênh màu (nội suy giữa hai mép mặt cắt), lấy độ lệch màu so với nền,
    * tìm vệt lệch, đo tâm và bề rộng. Vệt chạm mép mặt cắt (mép ngón tay, bóng đổ, mảng lớn) bị loại.
@@ -189,29 +239,38 @@ class NeedleDetector {
     const N   = 2 * m + 1;
     const thr = this.minContrast * 0.8;
     const gapSmall = Math.max(5, Math.round(0.02 * H)); // khe hở thường (lóe sáng trên thân kim)
-    const prof = new Float32Array(N), dev = new Float32Array(N);
+    const prof = new Float32Array(N), prof2 = new Float32Array(N), dev = new Float32Array(N);
 
     const pass = (mid, ux, uy, drift, search0, tS = 0, oS = 0) => {
       const nx = uy, ny = -ux;
       const slice = (t, oc, search) => {
+        // Hai kênh: độ sáng, và sắc đỏ (R − B). Kim thép xám trước ngón tay gần như cùng độ sáng với da
+        // nhưng khác hẳn về sắc đỏ, nên kênh thứ hai giữ được kim khi nó nằm trước bàn tay.
         for (let i = 0; i < N; i++) {
-          let sum = 0;
+          let sum = 0, rb = 0;
           for (let k = -1; k <= 1; k++) {
             const x = Math.round(mid[0] + ux * (t + k) + nx * (oc + i - m));
             const y = Math.round(mid[1] + uy * (t + k) + ny * (oc + i - m));
             if (x < 0 || y < 0 || x >= W || y >= H) return null;
             const j = (y * W + x) * 4;
             sum += d[j] + 2 * d[j + 1] + d[j + 2];
+            rb  += d[j] - d[j + 2];
           }
-          prof[i] = sum / 12;
+          prof[i] = sum / 12; prof2[i] = rb / 3;
         }
-        const bl = (prof[0] + prof[1] + prof[2]) / 3, br = (prof[N - 1] + prof[N - 2] + prof[N - 3]) / 3;
-        let ip = -1, p = 0;
-        for (let i = 0; i < N; i++) {
-          dev[i] = prof[i] - (bl + (br - bl) * i / (N - 1));
-          if (Math.abs(i - m) <= search && Math.abs(dev[i]) > Math.abs(p)) { p = dev[i]; ip = i; }
+        let ip = -1, p = 0, ch = prof;
+        for (const pr of [prof, prof2]) {
+          const bl = (pr[0] + pr[1] + pr[2]) / 3, br = (pr[N - 1] + pr[N - 2] + pr[N - 3]) / 3;
+          for (let i = 0; i < N; i++) {
+            const e = pr[i] - (bl + (br - bl) * i / (N - 1));
+            if (Math.abs(i - m) <= search && Math.abs(e) > Math.abs(p)) { p = e; ip = i; ch = pr; }
+          }
         }
         if (ip < 0 || Math.abs(p) < thr) return null;
+        {
+          const bl = (ch[0] + ch[1] + ch[2]) / 3, br = (ch[N - 1] + ch[N - 2] + ch[N - 3]) / 3;
+          for (let i = 0; i < N; i++) dev[i] = ch[i] - (bl + (br - bl) * i / (N - 1));
+        }
         const half = Math.abs(p) * 0.5, sg = Math.sign(p);
         let i0 = ip, i1 = ip;
         while (i0 > 0     && dev[i0 - 1] * sg > half) i0--;
@@ -275,13 +334,15 @@ class NeedleDetector {
     // trên ngón tay), rồi dò kỹ đoạn đó và ghép vào nếu thẳng hàng, cùng hướng.
     const lineO = t => f1.a + f1.b * t;
     const nx = u[1], ny = -u[0];
-    const lum = (x, y) => { const j = (Math.round(y) * W + Math.round(x)) * 4; return d[j] + 2 * d[j + 1] + d[j + 2]; };
-    const ridge = (x, y) => {                              // vệt mảnh: khác hẳn nền ở cả hai bên
-      const c = lum(x, y);
+    const val = (x, y, c) => { const j = (Math.round(y) * W + Math.round(x)) * 4; return c ? 4 * (d[j] - d[j + 2]) : d[j] + 2 * d[j + 1] + d[j + 2]; };
+    const ridge = (x, y) => {                              // vệt mảnh: khác hẳn nền ở cả hai bên (độ sáng hoặc sắc đỏ)
       let best = 0;
-      for (const k of [3, 6]) {
-        const l = lum(x - nx * k, y - ny * k), r = lum(x + nx * k, y + ny * k);
-        if (Math.sign(l - c) === Math.sign(r - c)) best = Math.max(best, Math.min(Math.abs(l - c), Math.abs(r - c)));
+      for (let c = 0; c < 2; c++) {
+        const v = val(x, y, c);
+        for (const k of [3, 6]) {
+          const l = val(x - nx * k, y - ny * k, c), r = val(x + nx * k, y + ny * k, c);
+          if (Math.sign(l - v) === Math.sign(r - v)) best = Math.max(best, Math.min(Math.abs(l - v), Math.abs(r - v)));
+        }
       }
       return best;
     };
