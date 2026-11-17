@@ -229,7 +229,82 @@ const Geo = (() => {
     return { speed: (hi - lo) / dur, dur };
   }
 
-  return { camera, ray, project, calibrate, angleOnly, pose, poseVisible, aboveSkinPx, median, strokeSpeed, descentSpeed };
+  /**
+   * Tốc độ châm từ chuyển động đi xuống của đỉnh kim (đơn vị cm dọc theo kim, tăng khi kim đi xuống).
+   * Không dùng ngưỡng vận tốc và không cần độ sâu chốt, nên đúng cho cả châm rất chậm lẫn rất nhanh:
+   *  1. Mức cuối F = vị trí khi kim đã dừng (trung vị 0,3 s cuối).
+   *  2. Lần ngược từ lúc dừng về trước dọc theo sườn đi xuống (bỏ qua các lần dừng giữa chừng) tới điểm
+   *     thấp nhất S — lúc kim bắt đầu đi xuống, nhưng không vượt lên trên mặt da (mức F − độ sâu chốt).
+   *     Quãng châm A = F − S. Mọi ngưỡng tính theo mức nhiễu đo ngay trong dữ liệu.
+   *  3. Tốc độ = 80% A chia cho thời gian đi từ mức 10% tới mức 90% của quãng đó (nội suy giữa hai khung).
+   * Khi cả lần châm diễn ra gọn trong khoảng một khung hình, thời gian thật ngắn hơn khả năng đo của camera:
+   * kết quả là GIỚI HẠN DƯỚI (floor = true, tốc độ thật có thể còn cao hơn).
+   * @param samples [{t (ms), r (cm)}]  @returns {{speed, dur, amount, floor}|null}
+   */
+  function riseSpeed(samples, depth = null, maxGapMs = 400) {
+    const n = samples.length;
+    if (n < 5) return null;
+    // Lọc trung vị 5 điểm (bỏ gai nhiễu nhưng giữ nguyên bước nhảy của cú châm nhanh).
+    const m = samples.map((_, i) => median(samples.slice(Math.max(0, i - 2), Math.min(n, i + 3)).map(s => s.r)));
+    const tEnd = samples[n - 1].t;
+    const tail = [];
+    for (let i = 0; i < n; i++) if (samples[i].t >= tEnd - 400) tail.push(i);
+    const F = median(tail.map(i => m[i]));
+    // Mức nhiễu đo ngay trong dữ liệu (độ lệch trung vị của đoạn đứng yên cuối) → mọi ngưỡng theo nhiễu thật.
+    const sig = 1.4826 * median(tail.map(i => Math.abs(samples[i].r - median(tail.map(j => samples[j].r))))) || 0;
+    const tol = Math.max(0.04, 1.5 * sig), tolP = Math.max(0.08, 3 * sig);
+    let iEnd = n - 1;
+    while (iEnd > 0 && Math.abs(m[iEnd - 1] - F) <= tolP) iEnd--;          // đầu của đoạn đứng yên cuối cùng
+    // Điểm bắt đầu châm = đoạn kim ĐỨNG NGHỈ gần nhất trước lần châm (đứng yên ≥ 0,25 s) ở gần mức mặt da
+    // (mức F − độ sâu chốt; cho lệch 20% độ sâu). Các lần dừng giữa chừng khi châm chậm từng nhịp nằm cao hơn
+    // nên không bị nhận nhầm; đoạn tay đưa kim tới nằm trước lúc nghỉ trên da nên bị loại.
+    const restMax = depth > 0 ? F - 0.8 * depth : Infinity;
+    let iS = -1, S = 0, iRest0 = 0;
+    for (let i = iEnd; i >= 1 && iS < 0; i--) {
+      let j = i;
+      while (j > 0 && samples[i].t - samples[j].t < 250) j--;
+      if (samples[i].t - samples[j].t < 250) break;
+      let lo = Infinity, hi = -Infinity;
+      for (let k = j; k <= i; k++) { if (m[k] < lo) lo = m[k]; if (m[k] > hi) hi = m[k]; }
+      if (hi - lo > tolP) continue;
+      const lvl = median(m.slice(j, i + 1));
+      if (lvl > restMax + tolP) continue;
+      iS = i; S = lvl; iRest0 = j;
+    }
+    if (iS < 0) {
+      // Không thấy lúc nghỉ trên da (châm ngay khi vừa đưa kim tới): lần ngược dọc sườn đi xuống,
+      // dừng ở mức mặt da.
+      const floorLvl = depth > 0 ? F - depth - Math.max(0.15, 0.3 * depth) : -Infinity;
+      iS = iEnd;
+      for (let i = iEnd; i > 0 && m[i - 1] <= m[i] + tol && m[i - 1] >= floorLvl; i--) if (m[i - 1] < m[iS]) iS = i - 1;
+      const rest = [];
+      for (let i = iS; i >= 0 && Math.abs(m[i] - m[iS]) <= tolP && samples[iS].t - samples[i].t <= 500; i--) rest.push(m[i]);
+      S = median(rest); iRest0 = iS;
+    }
+    const A = F - S;
+    if (!(A >= Math.max(0.1, 6 * sig))) return null;                         // không có lần châm rõ ràng (chỉ là nhiễu)
+    const L10 = S + 0.1 * A, L90 = S + 0.9 * A;
+    let a = -1, b = -1;
+    for (let k = iRest0; k < n; k++) {
+      if (m[k] <= L10) a = k;
+      else if (a >= 0 && m[k] >= L90) { b = k; break; }
+    }
+    if (a < 0 || b < 0) return null;
+    for (let k = a; k < b; k++) if (samples[k + 1].t - samples[k].t > maxGapMs) return null;   // mất dấu giữa lúc châm
+    const cross = (k, L) => {
+      const ya = m[k], yb = m[k + 1], ta = samples[k].t, tb = samples[k + 1].t;
+      return yb === ya ? tb : ta + (tb - ta) * (L - ya) / (yb - ya);
+    };
+    const dur = (cross(b - 1, L90) - cross(a, L10)) / 1000;
+    const gaps = []; for (let k = 1; k < n; k++) gaps.push(samples[k].t - samples[k - 1].t);
+    const dtMed = median(gaps) / 1000;
+    if (!(dur > 0)) return null;
+    // Lần châm gọn trong ≤ 2 khoảng giữa các khung: nội suy coi như kim đi đều giữa các khung nên thời gian
+    // tính ra dài hơn thật → đây chỉ là mức tối thiểu.
+    return { speed: 0.8 * A / dur, dur, amount: A, noise: sig, floor: b - a <= 2 || dur < 2 * dtMed };
+  }
+
+  return { camera, ray, project, calibrate, angleOnly, pose, poseVisible, aboveSkinPx, median, strokeSpeed, descentSpeed, riseSpeed };
 })();
 
 if (typeof module === 'object' && module.exports) module.exports = Geo;

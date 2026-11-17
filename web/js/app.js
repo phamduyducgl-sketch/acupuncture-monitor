@@ -60,6 +60,7 @@ let opencvReady = false;
 let streaming   = false;
 let loopHandle  = null;
 let lastFrameT  = 0;
+let lastVideoT  = -1;   // thời điểm (giây) của khung hình camera đã xử lý gần nhất
 let srcW        = 0;
 let focusInfo   = '';
 let tapMode     = null;    // null | 'skin' | 'region'
@@ -208,7 +209,9 @@ function setTapMode(mode) {
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 function openStream(deviceId) {
-  const v = { width: { ideal: 1920 }, height: { ideal: 1080 } };   // độ phân giải cao để còn chi tiết khi zoom số
+  // Độ phân giải cao để còn chi tiết khi zoom số; 60 khung/giây (nếu máy hỗ trợ) để đo được cú châm nhanh
+  // (một cú châm 0,05 s lọt giữa hai khung hình ở 15–30 khung/giây).
+  const v = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
   if (deviceId) v.deviceId = { exact: deviceId };
   else          v.facingMode = { ideal: 'environment' };
   return navigator.mediaDevices.getUserMedia({ video: v, audio: false });
@@ -340,7 +343,9 @@ async function recoverCamera() {
 /** Gọi khi kích thước khung hình gốc thay đổi (mở camera / đổi ống kính). */
 function onSourceSize(vw, vh) {
   srcW = vw;
-  camInfo.textContent = `${camInfo.dataset.label || 'camera'} · ${vw}×${vh} · lấy nét: ${focusInfo}`;
+  let fps = '';
+  try { const st = video.srcObject.getVideoTracks()[0].getSettings(); if (st.frameRate) fps = ` · ${Math.round(st.frameRate)} khung/s`; } catch (_) {}
+  camInfo.textContent = `${camInfo.dataset.label || 'camera'} · ${vw}×${vh}${fps} · lấy nét: ${focusInfo}`;
 }
 
 // ── Vòng lặp khung hình ───────────────────────────────────────────────────────
@@ -368,8 +373,12 @@ function trackUpdate(raw, onRaw) {
   if (raw.found) {
     const top    = canvasToSrc(raw.top[0], raw.top[1]);
     const bottom = canvasToSrc(raw.bottom[0], raw.bottom[1]);
+    // Kim chỉ trượt dọc trục khi châm: vị trí mới nằm trên trục kim cũ thì nhận ngay dù nhảy xa
+    // (châm nhanh có thể đi 1–2 cm giữa hai khung hình).
+    const alongAxis = track.top && track.dir && track.misses <= HOLD_FRAMES &&
+      Math.abs((top[0] - track.top[0]) * track.dir[1] - (top[1] - track.top[1]) * track.dir[0]) < roi.h * 0.03;
     const cont = track.top && track.misses <= HOLD_FRAMES &&
-      Math.hypot(top[0] - track.top[0], top[1] - track.top[1]) < roi.h * 0.12;
+      (alongAxis || Math.hypot(top[0] - track.top[0], top[1] - track.top[1]) < roi.h * 0.12);
     // Đang bám một cây kim mà kết quả mới nhảy xa (thường là ngón tay): chưa nhận ngay, coi như hụt một khung
     // và chỉ đổi sang vị trí mới khi nó lặp lại CONFIRM_N khung liên tiếp.
     if (!cont && track.top && track.misses <= HOLD_FRAMES * 3) {
@@ -383,7 +392,9 @@ function trackUpdate(raw, onRaw) {
     track.pend = null;
     const a   = cont ? 0.6 : 1;
     const mix = (o, n) => [o[0] + a * (n[0] - o[0]), o[1] + a * (n[1] - o[1])];
-    track.top    = cont ? mix(track.top, top) : top;
+    // Đỉnh kim KHÔNG làm mượt: làm mượt kéo dãn chuyển động nhanh ra nhiều khung → tốc độ thấp giả.
+    // (Số hiển thị đã được làm mượt riêng ở updateLive; kết quả chốt lấy trung vị.)
+    track.top    = top;
     track.bottom = cont && track.bottom ? mix(track.bottom, bottom) : bottom;
     if (raw.tipOk) {                             // điểm cuối nhìn thấy của cây kim (mũi kim / điểm đâm vào da)
       const tip = canvasToSrc(raw.tip[0], raw.tip[1]);
@@ -422,9 +433,13 @@ function frameStep() {
       delay = 100;
     } else {
       const now = performance.now();
+      watchVideo(now);
+      // Chưa có khung hình mới từ camera (xử lý nhanh hơn camera) → chờ, không xử lý lại khung cũ:
+      // khung trùng tạo các bước "đứng yên" giả trong lịch sử chuyển động, làm sai tốc độ.
+      if (video.currentTime === lastVideoT && video.currentTime > 0) { delay = 6; return; }
+      lastVideoT = video.currentTime;
       const dt  = (now - lastFrameT) / 1000;
       lastFrameT = now;
-      watchVideo(now);
       if (vw !== srcW) onSourceSize(vw, vh);
       layoutView(vw, vh);
       ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, canvas.width, canvas.height);
@@ -460,7 +475,7 @@ function frameStep() {
   } catch (e) {
     console.error('frameStep error:', e);
   } finally {
-    if (streaming) loopHandle = setTimeout(frameStep, delay);
+    if (streaming) loopHandle = setTimeout(frameStep, delay === 35 ? Math.max(4, 33 - (performance.now() - lastFrameT)) : delay);
   }
 }
 
@@ -677,21 +692,22 @@ function attemptStep(now, fresh) {
   const raw  = Geo.median(use.map(s => s.d));
   if (raw < MIN_DEPTH) return;
   const depth = Math.min(needleLenCm, raw);
-  const sp = Geo.descentSpeed(att.hist, depth);
+  const sp = Geo.riseSpeed(att.hist, depth);
   setPhase('done');
   chime('tong');
   report({
     depth: Math.round(depth * 10) / 10,
     speed: sp ? Math.round(sp.speed * 10) / 10 : null,   // null = không bám được chuyển động của kim lúc đâm
+    sf:    sp && sp.floor ? 1 : 0,                       // 1 = châm nhanh hơn khả năng đo (giá trị là mức tối thiểu)
     angle: Math.round(Geo.median(use.map(s => s.ang))),
   });
 }
 
-const fmtSpeed = v => v == null ? '—' : v.toFixed(1);
+const fmtSpeed = (v, floor) => v == null ? '—' : (floor ? '≥' : '') + v.toFixed(1);
 
 function report(res) {
   $('val-len').textContent   = res.depth.toFixed(1);
-  $('val-avg').textContent   = fmtSpeed(res.speed);
+  $('val-avg').textContent   = fmtSpeed(res.speed, res.sf);
   $('val-angle').textContent = res.angle;
   lastEl.style.display = 'block';
 
@@ -702,7 +718,7 @@ function report(res) {
   updatePracticeUI();
 
   if (opts.flash) {
-    flashEl.innerHTML = `<b>${res.depth.toFixed(1)} cm</b><span>${fmtSpeed(res.speed)} cm/s · ${res.angle}°</span>`;
+    flashEl.innerHTML = `<b>${res.depth.toFixed(1)} cm</b><span>${fmtSpeed(res.speed, res.sf)} cm/s · ${res.angle}°</span>`;
     flashEl.style.display = 'block';
     clearTimeout(report._t);
     report._t = setTimeout(() => { flashEl.style.display = 'none'; }, 2500);
@@ -1238,16 +1254,36 @@ function renderResults() {
     g.beginPath(); g.moveTo(L, Y(st.mean)); g.lineTo(R, Y(st.mean)); g.stroke();
     g.setLineDash([]); g.globalAlpha = 1;
 
-    g.lineWidth = 3; g.beginPath();
-    let pen = false;                                   // lần không đo được → ngắt đường nối
+    // Đường cong xu hướng: trung bình có trọng số Gauss quanh từng vị trí (hồi quy hạt nhân), không nối
+    // thẳng từng điểm. Độ rộng hạt nhân tăng theo số lần châm để đường cong mượt mà vẫn theo kịp xu hướng.
+    const pts = vals.map((v, k) => v == null ? null : [k, v]).filter(Boolean);
+    if (pts.length >= 3) {
+      const bw = Math.max(0.9, (recs.length - 1) / 7);
+      const trend = x => {
+        let sw = 0, sv = 0;
+        for (const [k, v] of pts) { const w = Math.exp(-0.5 * ((x - k) / bw) ** 2); sw += w; sv += w * v; }
+        return sv / sw;
+      };
+      const x0 = pts[0][0], x1 = pts[pts.length - 1][0], steps = Math.max(40, (x1 - x0) * 12);
+      g.strokeStyle = m.color; g.lineWidth = 5; g.lineJoin = 'round'; g.lineCap = 'round';
+      g.beginPath();
+      for (let i = 0; i <= steps; i++) {
+        const x = x0 + (x1 - x0) * i / steps, y = Y(Math.max(lo, Math.min(hi, trend(x))));
+        if (i) g.lineTo(X(x), y); else g.moveTo(X(x), y);
+      }
+      g.stroke();
+    } else if (pts.length === 2) {
+      g.strokeStyle = m.color; g.lineWidth = 3; g.globalAlpha = 0.6;
+      g.beginPath(); g.moveTo(X(pts[0][0]), Y(pts[0][1])); g.lineTo(X(pts[1][0]), Y(pts[1][1])); g.stroke();
+      g.globalAlpha = 1;
+    }
+    // Từng lần châm: chấm tròn nhạt, viền trắng để nổi trên đường xu hướng.
     vals.forEach((v, k) => {
-      if (v == null) { pen = false; return; }
-      if (pen) g.lineTo(X(k), Y(v)); else g.moveTo(X(k), Y(v));
-      pen = true;
+      if (v == null) return;
+      g.beginPath(); g.arc(X(k), Y(v), 7, 0, Math.PI * 2);
+      g.globalAlpha = 0.55; g.fillStyle = m.color; g.fill();
+      g.globalAlpha = 1; g.lineWidth = 2; g.strokeStyle = '#fff'; g.stroke();
     });
-    g.stroke();
-    g.fillStyle = m.color;
-    vals.forEach((v, k) => { if (v != null) { g.beginPath(); g.arc(X(k), Y(v), 7, 0, Math.PI * 2); g.fill(); } });
   });
 }
 
@@ -1255,8 +1291,9 @@ function buildCSV() {
   const rows = [
     ['MSSV', session.id], ['Bắt đầu', fmtTime(session.start)],
     ['Kết thúc', session.end ? fmtTime(session.end) : ''], [],
-    ['Lần', 'Thời điểm', 'Độ sâu (cm)', 'Tốc độ (cm/s)', 'Góc kim (độ)'],
-    ...session.records.map(r => [r.n, fmtTime(r.t), r.depth, r.speed ?? '', r.angle]),
+    ['Lần', 'Thời điểm', 'Độ sâu (cm)', 'Tốc độ (cm/s)', 'Góc kim (độ)', 'Ghi chú'],
+    ...session.records.map(r => [r.n, fmtTime(r.t), r.depth, r.speed ?? '', r.angle,
+                                 r.sf ? 'Tốc độ là mức tối thiểu (châm nhanh hơn khả năng đo)' : '']),
   ];
   const esc = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
   return '﻿' + rows.map(r => r.map(esc).join(',')).join('\r\n');   // BOM để Excel đọc đúng tiếng Việt
