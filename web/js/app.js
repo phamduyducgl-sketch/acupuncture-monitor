@@ -54,7 +54,8 @@ const offCtx         = offCanvas.getContext('2d', { willReadFrequently: true });
 
 const video  = $('video');
 const canvas = $('canvas');
-const ctx    = canvas.getContext('2d', { willReadFrequently: true });
+// Canvas hiển thị để trình duyệt tự tăng tốc bằng GPU; việc đọc điểm ảnh đi qua grabFrame().
+const ctx    = canvas.getContext('2d');
 
 let opencvReady = false;
 let streaming   = false;
@@ -307,6 +308,7 @@ function stopCamera() {
   setTapMode(null);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   proc.n = 0; proc.t0 = 0; proc.fps = 0;
+  resetGrab();                                // luồng camera mới có thể nhanh/chậm khác → thử lại
   $('cam-placeholder').style.display = 'block';
   btnCam.classList.remove('on');
   noDetect.style.display = 'none';
@@ -374,6 +376,46 @@ function onSourceSize(vw, vh) {
  * (số khung camera mới được xử lý mỗi giây — tốc độ châm chính xác theo nhịp này).
  */
 const proc = { n: 0, t0: 0, fps: 0, ms: [0, 0, 0] };
+
+/**
+ * Lấy khung hình camera (vùng đang xem, thu về cỡ canvas) thành mảng điểm ảnh và hiện lên canvas.
+ * Hai cách, tốc độ khác nhau tuỳ máy và tuỳ luồng camera (trên iPhone đo được 23–75 ms/khung với cách cũ):
+ *  'cpu' — vẽ lên canvas phụ giữ ảnh trong bộ nhớ CPU rồi đọc; trình duyệt phải chuyển cả khung hình
+ *          camera sang CPU trước khi thu nhỏ.
+ *  'gpu' — vẽ thẳng lên canvas hiển thị (GPU thu nhỏ), rồi chỉ đọc lại ảnh đã thu nhỏ.
+ * 24 khung đầu dùng xen kẽ hai cách, sau đó giữ cách nhanh hơn (trung vị thời gian).
+ */
+const grab = { method: null, trials: [], cpu: null, cpuCtx: null };
+function grabFrame() {
+  const W = canvas.width, H = canvas.height;
+  const m = grab.method || (grab.trials.length % 2 ? 'gpu' : 'cpu');
+  const t = performance.now();
+  let frame;
+  if (m === 'cpu') {
+    if (!grab.cpu) {
+      grab.cpu = document.createElement('canvas');
+      grab.cpuCtx = grab.cpu.getContext('2d', { willReadFrequently: true });
+    }
+    if (grab.cpu.width !== W || grab.cpu.height !== H) { grab.cpu.width = W; grab.cpu.height = H; }
+    grab.cpuCtx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, W, H);
+    frame = grab.cpuCtx.getImageData(0, 0, W, H);
+    ctx.putImageData(frame, 0, 0);
+  } else {
+    ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, W, H);
+    frame = ctx.getImageData(0, 0, W, H);
+  }
+  if (!grab.method) {
+    grab.trials.push({ m, ms: performance.now() - t });
+    if (grab.trials.length >= 24) {
+      const med = k => Geo.median(grab.trials.slice(4).filter(x => x.m === k).map(x => x.ms));   // bỏ vài khung khởi động
+      grab.method = med('gpu') < med('cpu') ? 'gpu' : 'cpu';
+      grab.cmp = `cpu ${med('cpu').toFixed(0)} / gpu ${med('gpu').toFixed(0)} ms`;
+      showCamInfo();
+    }
+  }
+  return frame;
+}
+function resetGrab() { grab.method = null; grab.trials = []; grab.cmp = ''; }
 /** Thời gian trung bình (làm mượt) của từng bước mỗi khung: đọc ảnh, nhận diện kim, phần còn lại. */
 function timeStages(...ms) { ms.forEach((v, i) => { proc.ms[i] += 0.1 * (v - proc.ms[i]); }); }
 function showCamInfo() {
@@ -384,8 +426,9 @@ function showCamInfo() {
   } catch (_) {}
   if (video.videoWidth) res = ` · ${video.videoWidth}×${video.videoHeight}`;
   const st = proc.ms;
-  const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s (mỗi khung: đọc ảnh ${st[0].toFixed(0)} ms, ` +
-                       `nhận diện ${st[1].toFixed(0)} ms, còn lại ${st[2].toFixed(0)} ms)` : '';
+  const how = grab.method ? `, cách ${grab.method.toUpperCase()} — thử: ${grab.cmp}` : ', đang thử cách đọc';
+  const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s (mỗi khung: đọc ảnh ${st[0].toFixed(0)} ms${how}; ` +
+                       `nhận diện ${st[1].toFixed(0)} ms; còn lại ${st[2].toFixed(0)} ms)` : '';
   camInfo.textContent = `${camInfo.dataset.label || 'camera'}${res}${cfps}${p} · lấy nét: ${focusInfo}`;
 }
 function countProcessed(now) {
@@ -494,9 +537,8 @@ function frameStep() {
       if (vw !== srcW) onSourceSize(vw, vh);
       layoutView(vw, vh);
       const t0 = performance.now();
-      ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, canvas.width, canvas.height);
-      // Đọc điểm ảnh MỘT lần, dùng chung cho dò tay và nhận diện kim (đọc từ canvas là bước tốn kém).
-      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      // Đọc điểm ảnh MỘT lần, dùng chung cho dò tay và nhận diện kim (đọc ảnh là bước tốn kém nhất).
+      const frame = grabFrame();
       const t1 = performance.now();
       motionStep(now, frame);
 
