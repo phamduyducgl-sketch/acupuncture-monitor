@@ -106,6 +106,39 @@ const Geo = (() => {
     };
   }
 
+  /**
+   * Tư thế kim khi THẤY CẢ CÂY KIM: đỉnh cán topPx và điểm cuối nhìn thấy endPx.
+   * Điểm cuối được coi là nằm trên mặt da (mặt phẳng nằm ngang qua điểm châm đã hiệu chuẩn), nên
+   * lấy được vị trí 3D của đúng điểm kim đâm vào — không cần kim đâm trúng chấm xanh.
+   * Độ sâu = chiều dài kim − phần kim còn nhìn thấy.
+   * Khi kim còn lơ lửng trên không, điểm cuối bị coi là xa hơn thực tế nên phần nhìn thấy tính ra
+   * dài hơn kim → raw âm → độ sâu 0 (đúng ý nghĩa: chưa châm).
+   * lenCm = 0 để chỉ đo phần nhìn thấy (dùng khi đo chiều dài kim: mũi kim chạm mặt da).
+   */
+  function poseVisible(cam, skinPx, dist, topPx, endPx, lenCm) {
+    const rs = ray(cam, skinPx);
+    const S  = scale(rs, dist / norm(rs));
+    const re = ray(cam, endPx), den = dot(re, cam.up);
+    if (den > -0.03) return null;                       // tia gần song song mặt da → không xác định
+    const E = scale(re, dot(S, cam.up) / den);
+    const T = onFrontal(cam, topPx, dot(E, cam.fwd));
+    if (!T) return null;
+    const rel = add(T, E, -1), exposed = norm(rel);
+    if (exposed < 1e-6) return null;
+    const d    = scale(rel, -1 / exposed);
+    const sinA = Math.min(1, -dot(d, cam.up));
+    if (sinA <= 0) return null;
+    const raw = lenCm - exposed;
+    const tip = add(T, d, lenCm || exposed);
+    return {
+      raw,
+      depth: Math.min(lenCm, Math.max(0, raw)),
+      angle: Math.asin(sinA) / RAD,
+      exposed,
+      tipPx: tip[2] > 1e-6 ? project(cam, tip) : null,
+    };
+  }
+
   /** Ảnh của điểm nằm cao hơn điểm châm một đoạn hCm theo phương thẳng đứng (dùng để căn khung). */
   function aboveSkinPx(cam, skinPx, dist, hCm) {
     const rs = ray(cam, skinPx);
@@ -152,7 +185,7 @@ const Geo = (() => {
     return { speed: (hi - lo) / dur, dur };
   }
 
-  return { camera, ray, project, calibrate, angleOnly, pose, aboveSkinPx, median, strokeSpeed };
+  return { camera, ray, project, calibrate, angleOnly, pose, poseVisible, aboveSkinPx, median, strokeSpeed };
 })();
 
 if (typeof module === 'object' && module.exports) module.exports = Geo;

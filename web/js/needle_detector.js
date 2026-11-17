@@ -10,6 +10,9 @@
  *   3. Chỉ giữ đoạn đủ dốc (≥ minIncline so với phương ngang), gom các đoạn thẳng hàng
  *      thành một trục, chọn trục dài nhất (ưu tiên gần vị trí cũ và đi qua điểm châm).
  *   4. Đầu trên của trục = đỉnh kim.
+ *   5. Từ đỉnh kim dò dọc xuống theo từng mặt cắt ngang trên ảnh gốc (không qua ngưỡng nhị phân)
+ *      để bám cả phần thân kim rất mảnh, tới điểm cuối nhìn thấy được: mũi kim khi kim còn ở
+ *      ngoài, hoặc điểm kim đâm vào da khi đã châm.
  */
 const clamp8 = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -33,10 +36,11 @@ class NeedleDetector {
    * @param   {[number,number]|null} opts.hint   - đỉnh kim ở khung trước (pixel canvas)
    * @param   {[number,number]|null} opts.skin   - điểm châm trên da (pixel canvas)
    * @param   {number[]|null}        opts.region - [x0, y0, x1, y1] vùng khoanh (pixel canvas)
-   * @returns {{found, top, bottom, incline, lengthPx}}
+   * @returns {{found, top, bottom, incline, lengthPx, tip, tipOk}}
+   *   tip = điểm cuối nhìn thấy của cây kim; tipOk = đoạn cuối đúng là thân kim mảnh (đáng tin)
    */
   detect(canvas, { hint = null, skin = null, region = null } = {}) {
-    const result = { found: false, top: null, bottom: null, incline: 90, lengthPx: 0 };
+    const result = { found: false, top: null, bottom: null, incline: 90, lengthPx: 0, tip: null, tipOk: false };
     const mats = [];
     const M = m => { mats.push(m); return m; };
 
@@ -49,7 +53,7 @@ class NeedleDetector {
         if (X1 - X0 < 8 || Y1 - Y0 < 8) return result;      // vùng nằm ngoài khung hiện tại
       }
 
-      const src = M(cv.imread(canvas));                      // RGBA
+      const src = M(canvas.data ? cv.matFromImageData(canvas) : cv.imread(canvas));   // RGBA
       const roiRect = new cv.Rect(X0, Y0, X1 - X0, Y1 - Y0);
       const planes  = M(new cv.MatVector());
       cv.split(src, planes);
@@ -170,12 +174,90 @@ class NeedleDetector {
       result.lengthPx = best.extent;
       result.incline  = Math.atan2(Math.abs(dy), Math.abs(dx)) * 180 / Math.PI;
 
+      const tr = this._trace(src, best.top, best.bottom);
+      if (tr) { result.tip = tr.end; result.tipOk = tr.ok; result.trace = tr; }
+
     } catch (e) {
       console.error('NeedleDetector.detect error:', e);
     } finally {
       mats.forEach(m => { try { if (m && !m.isDeleted?.()) m.delete(); } catch (_) {} });
     }
     return result;
+  }
+
+  /**
+   * Dò cả cây kim từ đỉnh xuống theo các mặt cắt ngang trục kim.
+   * Mỗi mặt cắt: trừ nền (nội suy giữa hai mép mặt cắt), tìm vệt lệch khỏi nền (sáng hoặc tối hơn),
+   * đo tâm và bề rộng của vệt. Vệt chạm mép mặt cắt (ngón tay, bóng đổ, mảng lớn) bị loại.
+   * Tâm chỉ được trôi chậm nên không bám theo bóng kim đổ ngang trên mặt da.
+   * @returns {{end, ok, len, handleW, endW}|null}
+   */
+  _trace(src, top, bottom) {
+    const d = src.data, W = src.cols, H = src.rows;
+    const ext = Math.hypot(bottom[0] - top[0], bottom[1] - top[1]);
+    if (ext < 4) return null;
+    const ux = (bottom[0] - top[0]) / ext, uy = (bottom[1] - top[1]) / ext;   // dọc kim, hướng xuống
+    const nx = uy, ny = -ux;                                                  // ngang kim
+    const m   = Math.max(8, Math.round(this._kSize * 0.6));                   // nửa bề rộng mặt cắt
+    const N   = 2 * m + 1;
+    const thr = this.minContrast * 0.8;
+    const gapMax = Math.max(5, Math.round(0.02 * H));
+    const prof = new Float32Array(N), dev = new Float32Array(N);
+
+    const slice = (t, oc, search) => {
+      for (let i = 0; i < N; i++) {
+        let sum = 0;
+        for (let k = -1; k <= 1; k++) {
+          const x = Math.round(top[0] + ux * (t + k) + nx * (oc + i - m));
+          const y = Math.round(top[1] + uy * (t + k) + ny * (oc + i - m));
+          if (x < 0 || y < 0 || x >= W || y >= H) return null;
+          const j = (y * W + x) * 4;
+          sum += d[j] + 2 * d[j + 1] + d[j + 2];
+        }
+        prof[i] = sum / 12;
+      }
+      const bl = (prof[0] + prof[1] + prof[2]) / 3, br = (prof[N - 1] + prof[N - 2] + prof[N - 3]) / 3;
+      let ip = -1, p = 0;
+      for (let i = 0; i < N; i++) {
+        dev[i] = prof[i] - (bl + (br - bl) * i / (N - 1));
+        if (Math.abs(i - m) <= search && Math.abs(dev[i]) > Math.abs(p)) { p = dev[i]; ip = i; }
+      }
+      if (ip < 0 || Math.abs(p) < thr) return null;
+      const half = Math.abs(p) * 0.5, sg = Math.sign(p);
+      let i0 = ip, i1 = ip;
+      while (i0 > 0     && dev[i0 - 1] * sg > half) i0--;
+      while (i1 < N - 1 && dev[i1 + 1] * sg > half) i1++;
+      if (i0 <= 2 || i1 >= N - 3) return null;          // vệt chạm mép → không phải vật mảnh
+      let sw = 0, sx = 0;
+      for (let i = i0; i <= i1; i++) { sw += dev[i] * sg; sx += dev[i] * sg * i; }
+      return { o: oc + sx / sw - m, w: i1 - i0 + 1 };
+    };
+
+    const tol = Math.max(3, Math.round(this._kSize * 0.3));
+    const ts = [], ws = [];
+    let oc = 0, lastT = -1, lastO = 0, gap = 0;
+    for (let t = 2; gap <= gapMax; t++) {
+      const px = top[0] + ux * t, py = top[1] + uy * t;
+      if (px < 2 || py < 2 || px >= W - 2 || py >= H - 2) break;
+      const r = slice(t, Math.round(oc), ts.length ? 3 : tol);
+      if (!r) { gap++; continue; }
+      gap = 0;
+      oc = ts.length ? oc + clamp8(r.o - oc, -0.35, 0.35) : r.o;
+      ts.push(t); ws.push(r.w);
+      lastT = t; lastO = oc;
+    }
+    if (ts.length < 8) return null;
+
+    const pct = (arr, q) => { const a = [...arr].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
+    const handleW = pct(ws.slice(0, Math.max(4, Math.ceil(ws.length * 0.4))), 0.75);   // cán kim ở phần trên
+    const endW    = pct(ws.slice(-8), 0.5);
+    const cover   = ts.length / Math.max(1, lastT - 1);
+    return {
+      end: [top[0] + ux * lastT + nx * lastO, top[1] + uy * lastT + ny * lastO],
+      len: lastT, handleW, endW,
+      // Đáng tin khi vệt liền mạch và đoạn cuối mảnh hẳn so với cán (đúng là thân kim, không phải đáy cán).
+      ok: cover >= 0.75 && lastT > ext * 0.5 && endW <= Math.max(2, 0.6 * handleW),
+    };
   }
 
   dispose() {

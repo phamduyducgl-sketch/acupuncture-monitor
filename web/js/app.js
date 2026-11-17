@@ -79,7 +79,9 @@ const geo = {
   region: store.get('region', null),              // vùng tìm kim {x0, y0, x1, y1} (tỉ lệ 0–1)
 };
 let roi = { x: 0, y: 0, w: 1, h: 1 };
-const track  = { top: null, bottom: null, dir: null, deg: 90, misses: 0 };
+const track  = { top: null, bottom: null, dir: null, deg: 90, misses: 0, tip: null, tipAge: 99 };
+const TIP_HOLD = 3;       // số khung còn tin điểm cuối kim sau lần dò được gần nhất
+const tipValid = () => !!track.tip && track.tipAge <= TIP_HOLD;
 const live   = { ema: null, shown: null, vel: 0, lastT: 0 };
 const att    = { phase: 'ready', buf: [], hist: [] };
 let poseNow  = null;       // tư thế kim của khung hiện tại (Geo.pose) hoặc null
@@ -139,11 +141,27 @@ function regionCanvas() {
 /**
  * Tư thế kim khung hiện tại: độ sâu (phần kim dưới mặt da, đo dọc theo kim), góc, mũi kim dự đoán.
  * Cần điểm mặt da + hiệu chuẩn; thiếu thì trả null.
+ *
+ * Hai cách đo:
+ *  'visible' — thấy cả cây kim tới điểm đâm vào da: độ sâu = chiều dài kim − phần còn nhìn thấy.
+ *              Không phụ thuộc việc đâm trúng chấm xanh.
+ *  'top'     — chỉ thấy cán kim (thân kim quá mờ / bị che): suy từ đỉnh cán + chiều dài kim,
+ *              giả định kim đâm tại chấm xanh.
+ * Nếu việc dò thân kim dừng sớm (bị che, mất tương phản) thì 'visible' cho độ sâu lớn giả; khi hai
+ * cách lệch nhau quá MODE_GAP cm thì tin cách 'top'.
  */
+const MODE_GAP = 0.8;
 function computePose() {
   const s = skinSrc();
-  if (!s || !geo.dist || !track.top || !track.dir) return null;
-  return Geo.pose(cam(), s, geo.dist, track.top, track.dir, needleLenCm);
+  if (!s || !geo.dist || !track.top) return null;
+  const c  = cam();
+  const pt = track.dir ? Geo.pose(c, s, geo.dist, track.top, track.dir, needleLenCm) : null;
+  const pv = tipValid() ? Geo.poseVisible(c, s, geo.dist, track.top, track.tip, needleLenCm) : null;
+  if (pt) pt.mode = 'top';
+  if (!pv) return pt;
+  pv.mode = 'visible';
+  if (pv.raw <= 0.05) return pv;                         // thấy trọn chiều dài kim → chắc chắn chưa châm
+  return pt && Math.abs(pv.raw - pt.raw) > MODE_GAP ? pt : pv;
 }
 
 function setDist(cm, persist = true) {
@@ -342,6 +360,13 @@ function trackUpdate(raw) {
     const mix = (o, n) => [o[0] + a * (n[0] - o[0]), o[1] + a * (n[1] - o[1])];
     track.top    = cont ? mix(track.top, top) : top;
     track.bottom = cont && track.bottom ? mix(track.bottom, bottom) : bottom;
+    if (raw.tipOk) {                             // điểm cuối nhìn thấy của cây kim (mũi kim / điểm đâm vào da)
+      const tip = canvasToSrc(raw.tip[0], raw.tip[1]);
+      track.tip = cont && tipValid() ? mix(track.tip, tip) : tip;
+      track.tipAge = 0;
+    } else {
+      track.tipAge++;
+    }
 
     const dx = bottom[0] - top[0], dy = bottom[1] - top[1];
     const n  = Math.hypot(dx, dy) || 1;
@@ -357,6 +382,7 @@ function trackUpdate(raw) {
     track.misses = 0;
   } else {
     track.misses++;
+    track.tipAge++;
     if (track.misses > 60) track.top = null;     // mất hẳn → bỏ gợi ý vị trí
   }
   return { found: !!track.top && track.misses <= HOLD_FRAMES, fresh: raw.found };
@@ -711,20 +737,43 @@ canvas.addEventListener('click', e => {
 
 // ── Hiệu chuẩn tỉ lệ & góc nghiêng ────────────────────────────────────────────
 $('btn-calib').addEventListener('click', () => {
-  const s = skinSrc();
-  if (!s) { notify('Hãy bấm MẶT DA và chạm vào điểm châm trước.'); return; }
   if (!track.top || track.misses > HOLD_FRAMES) { notify('Chưa nhận diện được kim.'); return; }
+  // Thấy được mũi kim → lấy luôn mũi kim làm điểm châm (chính xác hơn chạm tay); không thì dùng chấm xanh đã đặt.
+  const auto = tipValid();
+  const s = auto ? track.tip.slice() : skinSrc();
+  if (!s) { notify('Chưa thấy mũi kim — hãy bấm MẶT DA và chạm vào điểm mũi kim chạm da trước.'); return; }
   if (Math.hypot(track.top[0] - s[0], track.top[1] - s[1]) < 20) {
     notify('Đỉnh kim quá gần điểm mặt da — kiểm tra lại vị trí.'); return;
   }
   const c = Geo.calibrate(cam(), s, track.top, needleLenCm);
   if (!c || !(c.dist > 3 && c.dist < 300)) { notify('Không hiệu chuẩn được — kiểm tra góc nghiêng máy và điểm mặt da.'); return; }
+  if (auto) {
+    geo.skin = { fx: s[0] / video.videoWidth, fy: s[1] / video.videoHeight };
+    store.set('skin', geo.skin);
+  }
   setDist(c.dist);
   // Căn lại khung một lần theo tỉ lệ mới để thấy trọn kim cả khi nhấc lên.
   if (view.auto) frameOn(track.top, video.videoWidth, video.videoHeight);
-  notify(`Đã hiệu chuẩn: camera cách điểm châm ${c.dist.toFixed(1)} cm (đo thước để đối chiếu).` +
-         (c.angle < 83 ? `\n⚠ Kim đang nghiêng ${Math.round(90 - c.angle)}° — giữ kim thẳng đứng rồi hiệu chuẩn lại.`
-                       : '\nVòng tròn vàng phải trùng mũi kim thật.'));
+  notify(`Đã hiệu chuẩn với kim ${needleLenCm} cm: camera cách điểm châm ${c.dist.toFixed(1)} cm (đo thước để đối chiếu).` +
+         (auto ? '' : '\nKhông thấy rõ mũi kim nên dùng chấm xanh đã đặt.') +
+         (c.angle < 83 ? `\n⚠ Kim đang nghiêng ${Math.round(90 - c.angle)}° — giữ kim thẳng đứng rồi hiệu chuẩn lại.` : ''));
+});
+
+// Đo chiều dài một cây kim mới: mũi kim chạm mặt da (bất kỳ chỗ nào), app thấy cả cây kim.
+$('btn-len').addEventListener('click', () => {
+  const s = skinSrc();
+  if (!s || !geo.dist) { notify('Hãy HIỆU CHUẨN một lần với kim đã biết chiều dài trước.'); return; }
+  if (!track.top || track.misses > HOLD_FRAMES || !tipValid()) {
+    notify('Chưa thấy trọn cây kim (cần thấy vòng xanh ngọc ở mũi kim). Đặt mũi kim chạm mặt da, buông tay khỏi thân kim.');
+    return;
+  }
+  const p = Geo.poseVisible(cam(), s, geo.dist, track.top, track.tip, 0);
+  if (!p || !(p.exposed >= 1 && p.exposed <= 20)) { notify('Không đo được chiều dài kim.'); return; }
+  needleLenCm = Math.round(p.exposed * 10) / 10;
+  store.set('needleLen', needleLenCm);
+  lenEl.value = needleLenCm;
+  live.ema = null; resetAttempt();
+  notify(`Kim dài ${needleLenCm.toFixed(1)} cm (đo lúc mũi kim chạm da).`);
 });
 
 // Đổi góc máy / góc nhìn làm thay đổi mô hình camera → hiệu chuẩn cũ không còn khớp.
@@ -840,6 +889,11 @@ function drawNeedle() {
       ctx.fillStyle = '#ffd33d'; ctx.fill();
     }
   }
+  if (tipValid()) {                        // điểm cuối nhìn thấy của kim (xanh ngọc): mũi kim / điểm đâm vào da
+    const [vx, vy] = srcToCanvas(track.tip[0], track.tip[1]);
+    ctx.beginPath(); ctx.arc(vx, vy, 4, 0, Math.PI * 2);
+    ctx.strokeStyle = '#39d0d8'; ctx.lineWidth = 2; ctx.stroke();
+  }
   ctx.beginPath();
   ctx.arc(tx, ty, 5, 0, Math.PI * 2);
   ctx.fillStyle = '#ff4444';
@@ -869,8 +923,7 @@ btnPractice.addEventListener('click', () => {
   const id = stuId.value.trim();
   if (!id)             { notify('Hãy nhập MSSV ở góc trên trái trước.'); stuId.focus(); return; }
   if (!streaming)      { notify('Hãy bật camera trước.'); return; }
-  if (!geo.skin)       { notify('Hãy bấm MẶT DA và chạm vào điểm châm trước.'); return; }
-  if (!geo.dist)       { notify('Hãy HIỆU CHUẨN trước (mũi kim chạm da tại chấm xanh).'); return; }
+    if (!geo.skin || !geo.dist) { notify('Hãy HIỆU CHUẨN trước (kim thẳng đứng, mũi kim chạm mặt da).'); return; }
   unlockAudio();
   store.set('mssv', id);
   session = { id, start: new Date().toISOString(), end: null, records: [] };
