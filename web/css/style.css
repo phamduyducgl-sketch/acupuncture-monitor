@@ -111,6 +111,7 @@ button, input, select { font-family: inherit; }
   pointer-events: none;
 }
 .pill.info { background: rgba(31,111,235,0.92); }
+.pill.ok   { background: rgba(26,127,55,0.95); font-weight: 700; }
 .pill.warn { background: rgba(218,54,51,0.88); }
 
 /* ── Số liệu hai bên ── */

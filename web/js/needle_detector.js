@@ -7,12 +7,12 @@
  *   1. Ảnh xám → top-hat + black-hat: giữ lại các cấu trúc mảnh (sáng hoặc tối hơn nền),
  *      bỏ các mảng lớn và các mép bậc thang (mép bàn, mép mô hình da).
  *   2. Ngưỡng theo thống kê ảnh → HoughLinesP: tìm các đoạn thẳng.
- *   3. Chỉ giữ đoạn đủ dốc (≥ minIncline so với phương ngang), gom các đoạn thẳng hàng
- *      thành một trục, chọn trục dài nhất (ưu tiên gần vị trí cũ và đi qua điểm châm).
- *   4. Đầu trên của trục = đỉnh kim.
- *   5. Từ đỉnh kim dò dọc xuống theo từng mặt cắt ngang trên ảnh gốc (không qua ngưỡng nhị phân)
- *      để bám cả phần thân kim rất mảnh, tới điểm cuối nhìn thấy được: mũi kim khi kim còn ở
- *      ngoài, hoặc điểm kim đâm vào da khi đã châm.
+ *   3. Chỉ giữ đoạn đủ dốc (≥ minIncline so với phương ngang); mỗi đoạn là một "hạt giống".
+ *   4. Từ mỗi hạt giống dò dọc hai phía theo từng mặt cắt ngang trên ảnh gốc (không qua ngưỡng nhị phân):
+ *      bám cả cán lẫn thân kim rất mảnh, từ đỉnh cán tới điểm cuối nhìn thấy được (mũi kim khi kim
+ *      còn ở ngoài, hoặc điểm kim đâm vào da khi đã châm), rồi khớp một đường thẳng.
+ *   5. Chọn ứng viên dài, liền mạch và THẲNG nhất (ưu tiên gần vị trí/hướng cũ và đi qua điểm châm).
+ *      Mép ngón tay (bậc thang một phía) và nếp gấp ngón tay (cong) bị loại ở bước này.
  */
 const clamp8 = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -34,12 +34,14 @@ class NeedleDetector {
    * @param   {HTMLCanvasElement} canvas
    * @param   {object} [opts]
    * @param   {[number,number]|null} opts.hint   - đỉnh kim ở khung trước (pixel canvas)
+   * @param   {[number,number]|null} opts.hintDir - hướng kim ở khung trước (vector đơn vị, hướng xuống)
+   * @param   {number}               opts.hintLen - chiều dài kim trên ảnh ở khung trước (pixel canvas)
    * @param   {[number,number]|null} opts.skin   - điểm châm trên da (pixel canvas)
    * @param   {number[]|null}        opts.region - [x0, y0, x1, y1] vùng khoanh (pixel canvas)
    * @returns {{found, top, bottom, incline, lengthPx, tip, tipOk}}
    *   tip = điểm cuối nhìn thấy của cây kim; tipOk = đoạn cuối đúng là thân kim mảnh (đáng tin)
    */
-  detect(canvas, { hint = null, skin = null, region = null } = {}) {
+  detect(canvas, { hint = null, hintDir = null, hintLen = 0, skin = null, region = null } = {}) {
     const result = { found: false, top: null, bottom: null, incline: 90, lengthPx: 0, tip: null, tipOk: false };
     const mats = [];
     const M = m => { mats.push(m); return m; };
@@ -99,83 +101,71 @@ class NeedleDetector {
         if (uy < sinMin) continue;
         segs.push({ x1, y1, x2, y2, len, ux, uy, mx: (x1 + x2) / 2, my: (y1 + y2) / 2 });
       }
-      if (!segs.length) return result;
+      if (!segs.length && !(hint && hintDir)) return result;
 
-      // ── Gom các đoạn thẳng hàng quanh mỗi "hạt giống" dài nhất ──
+      // ── Kiểm chứng từng ứng viên bằng cách dò mặt cắt trên ảnh gốc ──
+      // Đoạn Hough chỉ là "hạt giống". Kim thật là một vệt mảnh HAI PHÍA đều là nền, thẳng tắp và dài;
+      // mép ngón tay là bậc thang một phía (bị loại ở mặt cắt), nếp gấp giữa các ngón thì cong và ngắn.
       segs.sort((a, b) => b.len - a.len);
       const diag = Math.hypot(W, H);
       const minExtent = Math.max(24, 0.07 * H);
+      const bounds = [X0, Y0, X1, Y1];
       let best = null, bestScore = 0;
+      const tried = [];
 
-      // Dò dọc theo trục trên ảnh nhị phân để tìm đúng hai đầu mút của vật
-      // (đoạn Hough thường dừng sớm hoặc chỉ bám một mép của cán kim).
-      const tol  = Math.max(3, Math.round(this._kSize * 0.3));
-      const data = bin.data, bw = bin.cols, bhgt = bin.rows;
-      const lit  = (x, y) => {
-        const c = Math.round(x) - X0, r = Math.round(y) - Y0;
-        return c >= 0 && r >= 0 && c < bw && r < bhgt && data[r * bw + c] > 0;
-      };
-      const walk = (seed, t0, dir) => {
-        let t = t0, last = t0, gap = 0;
-        while (gap <= 6) {
-          t += dir;
-          const px = seed.mx + seed.ux * t, py = seed.my + seed.uy * t;
-          if (px < X0 || px >= X1 || py < Y0 || py >= Y1) break;
-          let hit = false;
-          for (let o = -tol; o <= tol && !hit; o++) hit = lit(px + o * seed.uy, py - o * seed.ux);
-          if (hit) { last = t; gap = 0; } else gap++;
+      // Hạt giống đầu tiên: vị trí và hướng kim ở khung trước (nếu có) — giữ được kim khi tay làm mất đoạn Hough.
+      const seeds = segs.slice(0, 12);
+      if (hint && hintDir) {
+        const L = Math.max(0.08 * H, hintLen || 0);          // cả chiều dài kim ở khung trước
+        seeds.unshift({ mx: hint[0] + hintDir[0] * L / 2, my: hint[1] + hintDir[1] * L / 2, ux: hintDir[0], uy: hintDir[1], len: L });
+      }
+      for (const seed of seeds) {
+        // Bỏ hạt giống nằm trên một trục đã dò (cùng một vật).
+        if (tried.some(q => Math.abs(q.dir[0] * seed.uy - q.dir[1] * seed.ux) < 0.1 &&
+              Math.abs((seed.mx - q.top[0]) * q.dir[1] - (seed.my - q.top[1]) * q.dir[0]) < 4)) continue;
+        // Dò từ nhiều điểm xuất phát dọc hạt giống: điểm rơi vào chỗ kim lẫn với ngón tay sẽ dò hỏng,
+        // điểm rơi vào đoạn kim nổi rõ trên nền sẽ cho cả cây kim. Giữ kết quả tốt nhất.
+        const half = (seed.len || 0) / 2;
+        let tr = null, trQ = 0;
+        for (const f of half > 12 ? [0, -0.85, 0.85, -0.6, 0.6, -0.3, 0.3] : [0]) {
+          const c = this._trace(src, [seed.mx + seed.ux * half * f, seed.my + seed.uy * half * f], [seed.ux, seed.uy], bounds);
+          if (!c || c.rms > 1.5 || c.cover < 0.5) continue;
+          const q = c.len * c.cover / (1 + c.rms * c.rms);
+          if (q > trQ) { trQ = q; tr = c; }
         }
-        return last;
-      };
+        if (!tr) continue;
+        tried.push(tr);
+        if (tr.len < minExtent || tr.dir[1] < sinMin) continue;
 
-      for (const seed of segs.slice(0, 8)) {
-        let tMin = Infinity, tMax = -Infinity, cover = 0;
-        for (const s of segs) {
-          if (Math.abs(seed.ux * s.uy - seed.uy * s.ux) > 0.14) continue;          // lệch hướng > 8°
-          const dx = s.mx - seed.mx, dy = s.my - seed.my;
-          const along = dx * seed.ux + dy * seed.uy;
-          const lat   = Math.abs(dx * seed.uy - dy * seed.ux);
-          if (lat > tol + 0.02 * Math.abs(along)) continue;                         // không thẳng hàng
-          for (const [px, py] of [[s.x1, s.y1], [s.x2, s.y2]]) {
-            const t = (px - seed.mx) * seed.ux + (py - seed.my) * seed.uy;
-            if (t < tMin) tMin = t;
-            if (t > tMax) tMax = t;
-          }
-          cover += s.len;
-        }
-        tMin = walk(seed, tMin, -1);
-        tMax = walk(seed, tMax, +1);
-        const extent = tMax - tMin;
-        if (extent < minExtent) continue;
-
-        const top    = [seed.mx + seed.ux * tMin, seed.my + seed.uy * tMin];
-        const bottom = [seed.mx + seed.ux * tMax, seed.my + seed.uy * tMax];
-        let score = Math.min(extent, cover) * seed.uy * seed.uy;   // dài, liền mạch, dựng đứng
-
+        let score = tr.len * tr.cover * tr.dir[1] * tr.dir[1] / (1 + tr.rms * tr.rms);   // dài, liền, thẳng, dựng đứng
         if (hint) {
-          const d = Math.hypot(top[0] - hint[0], top[1] - hint[1]) / (0.15 * diag);
+          const d = Math.hypot(tr.top[0] - hint[0], tr.top[1] - hint[1]) / (0.10 * diag);
           score /= 1 + d * d;
+        }
+        if (hintDir) {
+          const c = Math.abs(tr.dir[0] * hintDir[1] - tr.dir[1] * hintDir[0]) / 0.2;      // lệch hướng ~12° → giảm nửa
+          score /= 1 + c * c;
         }
         if (skin) {
           // Trục kim kéo dài phải đi gần điểm châm và đỉnh kim phải ở phía trên mặt da.
-          const lat = Math.abs((skin[0] - top[0]) * seed.uy - (skin[1] - top[1]) * seed.ux);
+          const lat = Math.abs((skin[0] - tr.top[0]) * tr.dir[1] - (skin[1] - tr.top[1]) * tr.dir[0]);
           const q = lat / (0.08 * diag);
           score /= 1 + q * q;
-          if (top[1] > skin[1]) score *= 0.05;
+          if (tr.top[1] > skin[1]) score *= 0.05;
         }
-        if (score > bestScore) { bestScore = score; best = { top, bottom, extent }; }
+        if (score > bestScore) { bestScore = score; best = tr; }
       }
       if (!best) return result;
 
-      const dx = best.bottom[0] - best.top[0], dy = best.bottom[1] - best.top[1];
       result.found    = true;
       result.top      = best.top;
-      result.bottom   = best.bottom;
-      result.lengthPx = best.extent;
-      result.incline  = Math.atan2(Math.abs(dy), Math.abs(dx)) * 180 / Math.PI;
-
-      const tr = this._trace(src, best.top, best.bottom);
-      if (tr) { result.tip = tr.end; result.tipOk = tr.ok; result.trace = tr; }
+      result.bottom   = best.end;
+      result.dir      = best.dir;
+      result.lengthPx = best.len;
+      result.incline  = Math.atan2(Math.abs(best.dir[1]), Math.abs(best.dir[0])) * 180 / Math.PI;
+      result.tip      = best.end;
+      result.tipOk    = best.ok;
+      result.quality  = { cover: best.cover, rms: best.rms, handleW: best.handleW, endW: best.endW };
 
     } catch (e) {
       console.error('NeedleDetector.detect error:', e);
@@ -186,77 +176,171 @@ class NeedleDetector {
   }
 
   /**
-   * Dò cả cây kim từ đỉnh xuống theo các mặt cắt ngang trục kim.
-   * Mỗi mặt cắt: trừ nền (nội suy giữa hai mép mặt cắt), tìm vệt lệch khỏi nền (sáng hoặc tối hơn),
-   * đo tâm và bề rộng của vệt. Vệt chạm mép mặt cắt (ngón tay, bóng đổ, mảng lớn) bị loại.
-   * Tâm chỉ được trôi chậm nên không bám theo bóng kim đổ ngang trên mặt da.
-   * @returns {{end, ok, len, handleW, endW}|null}
+   * Dò cả cây kim theo các mặt cắt ngang trục, từ một điểm trên kim đi về hai phía.
+   * Mỗi mặt cắt: trừ nền từng kênh màu (nội suy giữa hai mép mặt cắt), lấy độ lệch màu so với nền,
+   * tìm vệt lệch, đo tâm và bề rộng. Vệt chạm mép mặt cắt (mép ngón tay, bóng đổ, mảng lớn) bị loại.
+   * Sau đó khớp đường thẳng bền vững (bỏ các điểm bị mép ngón tay kéo lệch), rồi kéo dài đường thẳng
+   * xuống dưới để nối với đoạn thân kim mảnh nằm phía dưới ngón tay nếu cán kim bị tay che.
+   * @returns {{top, end, dir, len, cover, rms, handleW, endW, ok}|null}  top = đầu trên, end = đầu dưới
    */
-  _trace(src, top, bottom) {
+  _trace(src, mid, u, bounds) {
     const d = src.data, W = src.cols, H = src.rows;
-    const ext = Math.hypot(bottom[0] - top[0], bottom[1] - top[1]);
-    if (ext < 4) return null;
-    const ux = (bottom[0] - top[0]) / ext, uy = (bottom[1] - top[1]) / ext;   // dọc kim, hướng xuống
-    const nx = uy, ny = -ux;                                                  // ngang kim
-    const m   = Math.max(8, Math.round(this._kSize * 0.6));                   // nửa bề rộng mặt cắt
+    const m   = Math.max(8, Math.round(this._kSize * 0.6));   // nửa bề rộng mặt cắt
     const N   = 2 * m + 1;
     const thr = this.minContrast * 0.8;
-    const gapMax = Math.max(5, Math.round(0.02 * H));
+    const gapSmall = Math.max(5, Math.round(0.02 * H)); // khe hở thường (lóe sáng trên thân kim)
     const prof = new Float32Array(N), dev = new Float32Array(N);
 
-    const slice = (t, oc, search) => {
-      for (let i = 0; i < N; i++) {
-        let sum = 0;
-        for (let k = -1; k <= 1; k++) {
-          const x = Math.round(top[0] + ux * (t + k) + nx * (oc + i - m));
-          const y = Math.round(top[1] + uy * (t + k) + ny * (oc + i - m));
-          if (x < 0 || y < 0 || x >= W || y >= H) return null;
-          const j = (y * W + x) * 4;
-          sum += d[j] + 2 * d[j + 1] + d[j + 2];
+    const pass = (mid, ux, uy, drift, search0, tS = 0, oS = 0) => {
+      const nx = uy, ny = -ux;
+      const slice = (t, oc, search) => {
+        for (let i = 0; i < N; i++) {
+          let sum = 0;
+          for (let k = -1; k <= 1; k++) {
+            const x = Math.round(mid[0] + ux * (t + k) + nx * (oc + i - m));
+            const y = Math.round(mid[1] + uy * (t + k) + ny * (oc + i - m));
+            if (x < 0 || y < 0 || x >= W || y >= H) return null;
+            const j = (y * W + x) * 4;
+            sum += d[j] + 2 * d[j + 1] + d[j + 2];
+          }
+          prof[i] = sum / 12;
         }
-        prof[i] = sum / 12;
+        const bl = (prof[0] + prof[1] + prof[2]) / 3, br = (prof[N - 1] + prof[N - 2] + prof[N - 3]) / 3;
+        let ip = -1, p = 0;
+        for (let i = 0; i < N; i++) {
+          dev[i] = prof[i] - (bl + (br - bl) * i / (N - 1));
+          if (Math.abs(i - m) <= search && Math.abs(dev[i]) > Math.abs(p)) { p = dev[i]; ip = i; }
+        }
+        if (ip < 0 || Math.abs(p) < thr) return null;
+        const half = Math.abs(p) * 0.5, sg = Math.sign(p);
+        let i0 = ip, i1 = ip;
+        while (i0 > 0     && dev[i0 - 1] * sg > half) i0--;
+        while (i1 < N - 1 && dev[i1 + 1] * sg > half) i1++;
+        if (i0 <= 2 || i1 >= N - 3) return null;          // vệt chạm mép → không phải vật mảnh
+        let sw = 0, sx = 0;
+        for (let i = i0; i <= i1; i++) { sw += dev[i] * sg; sx += dev[i] * sg * i; }
+        return { o: oc + sx / sw - m, w: i1 - i0 + 1 };
+      };
+
+      const first = slice(tS, Math.round(oS), search0);
+      if (!first) return null;
+      const walk = sgn => {
+        const pts = [];
+        let oc = first.o, gap = 0;
+        for (let k = 1; gap <= gapSmall; k++) {
+          const t = tS + sgn * k;
+          const px = mid[0] + ux * t, py = mid[1] + uy * t;
+          if (px < bounds[0] || py < bounds[1] || px >= bounds[2] || py >= bounds[3]) break;
+          const r = slice(t, Math.round(oc), 3);
+          if (!r) { gap++; continue; }
+          gap = 0;
+          oc += clamp8(r.o - oc, -drift, drift);
+          pts.push([t, r.o, r.w]);
+        }
+        return pts;
+      };
+      const up = walk(-1), down = walk(+1);
+      return [...up.reverse(), [tS, first.o, first.w], ...down];        // theo t tăng dần (trên → dưới)
+    };
+
+    // Khớp đường thẳng o = a + b·t, lặp lại sau khi bỏ điểm lệch xa (bị mép ngón tay kéo).
+    const fit = pts => {
+      let use = pts, a = 0, b = 0;
+      for (let it = 0; it < 4; it++) {
+        let st = 0, so = 0, stt = 0, sto = 0;
+        for (const [t, o] of use) { st += t; so += o; stt += t * t; sto += t * o; }
+        const n = use.length, den = n * stt - st * st;
+        b = den > 1e-6 ? (n * sto - st * so) / den : 0; a = (so - b * st) / n;
+        const res = pts.map(q => Math.abs(q[1] - (a + b * q[0]))).sort((x, y) => x - y);
+        const lim = Math.max(1, 2 * res[res.length >> 1]);
+        const next = pts.filter(q => Math.abs(q[1] - (a + b * q[0])) <= lim);
+        if (next.length < 12 || next.length === use.length) { use = next.length >= 12 ? next : use; break; }
+        use = next;
       }
-      const bl = (prof[0] + prof[1] + prof[2]) / 3, br = (prof[N - 1] + prof[N - 2] + prof[N - 3]) / 3;
-      let ip = -1, p = 0;
-      for (let i = 0; i < N; i++) {
-        dev[i] = prof[i] - (bl + (br - bl) * i / (N - 1));
-        if (Math.abs(i - m) <= search && Math.abs(dev[i]) > Math.abs(p)) { p = dev[i]; ip = i; }
-      }
-      if (ip < 0 || Math.abs(p) < thr) return null;
-      const half = Math.abs(p) * 0.5, sg = Math.sign(p);
-      let i0 = ip, i1 = ip;
-      while (i0 > 0     && dev[i0 - 1] * sg > half) i0--;
-      while (i1 < N - 1 && dev[i1 + 1] * sg > half) i1++;
-      if (i0 <= 2 || i1 >= N - 3) return null;          // vệt chạm mép → không phải vật mảnh
-      let sw = 0, sx = 0;
-      for (let i = i0; i <= i1; i++) { sw += dev[i] * sg; sx += dev[i] * sg * i; }
-      return { o: oc + sx / sw - m, w: i1 - i0 + 1 };
+      let ss = 0;
+      for (const [t, o] of use) { const e = o - (a + b * t); ss += e * e; }
+      // Tham số lấy từ các điểm tin cậy; phạm vi (hai đầu kim) giữ mọi điểm lệch ≤ 3 px để không cắt cụt.
+      return { a, b, inl: pts.filter(q => Math.abs(q[1] - (a + b * q[0])) <= 3), rms: Math.sqrt(ss / use.length) };
     };
 
     const tol = Math.max(3, Math.round(this._kSize * 0.3));
-    const ts = [], ws = [];
-    let oc = 0, lastT = -1, lastO = 0, gap = 0;
-    for (let t = 2; gap <= gapMax; t++) {
-      const px = top[0] + ux * t, py = top[1] + uy * t;
-      if (px < 2 || py < 2 || px >= W - 2 || py >= H - 2) break;
-      const r = slice(t, Math.round(oc), ts.length ? 3 : tol);
-      if (!r) { gap++; continue; }
-      gap = 0;
-      oc = ts.length ? oc + clamp8(r.o - oc, -0.35, 0.35) : r.o;
-      ts.push(t); ws.push(r.w);
-      lastT = t; lastO = oc;
-    }
-    if (ts.length < 8) return null;
+    const p1 = pass(mid, u[0], u[1], 0.35, tol);
+    if (!p1 || p1.length < 12) return null;
+    const f1 = fit(p1);
+    let pts = f1.inl;
+    const pct = (arr, q) => { const s = [...arr].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
 
-    const pct = (arr, q) => { const a = [...arr].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
-    const handleW = pct(ws.slice(0, Math.max(4, Math.ceil(ws.length * 0.4))), 0.75);   // cán kim ở phần trên
-    const endW    = pct(ws.slice(-8), 0.5);
-    const cover   = ts.length / Math.max(1, lastT - 1);
+    // Nối qua chỗ bị che (ngón tay cầm kim): đi tiếp theo đúng đường thẳng đã khớp về CẢ HAI phía, tìm một
+    // đoạn vệt mảnh dài ≥ 12 điểm nằm đúng trên đường kéo dài (thân kim dưới ngón tay, hoặc cán kim nhô lên
+    // trên ngón tay), rồi dò kỹ đoạn đó và ghép vào nếu thẳng hàng, cùng hướng.
+    const lineO = t => f1.a + f1.b * t;
+    const nx = u[1], ny = -u[0];
+    const lum = (x, y) => { const j = (Math.round(y) * W + Math.round(x)) * 4; return d[j] + 2 * d[j + 1] + d[j + 2]; };
+    const ridge = (x, y) => {                              // vệt mảnh: khác hẳn nền ở cả hai bên
+      const c = lum(x, y);
+      let best = 0;
+      for (const k of [3, 6]) {
+        const l = lum(x - nx * k, y - ny * k), r = lum(x + nx * k, y + ny * k);
+        if (Math.sign(l - c) === Math.sign(r - c)) best = Math.max(best, Math.min(Math.abs(l - c), Math.abs(r - c)));
+      }
+      return best;
+    };
+    let bridged = false;
+    const bridge = sgn => {
+      const tFrom = sgn > 0 ? pts[pts.length - 1][0] : pts[0][0];
+      let run = [], bestRun = null;
+      const close = () => { if (run.length >= 12 && (!bestRun || run.length > bestRun.length)) bestRun = run; };
+      for (let k = 1; ; k++) {
+        const t = tFrom + sgn * k, o0 = lineO(t), win = Math.round(2 + 0.04 * k);
+        const cx = mid[0] + u[0] * t + nx * o0, cy = mid[1] + u[1] * t + ny * o0;
+        if (cx < bounds[0] + win + 7 || cy < bounds[1] + 1 || cx >= bounds[2] - win - 7 || cy >= bounds[3] - 1) break;
+        let hit = null, bestC = thr * 4;
+        for (let o = -win; o <= win; o++) {
+          const c = ridge(cx + nx * o, cy + ny * o);
+          if (c > bestC) { bestC = c; hit = o0 + o; }
+        }
+        const last = run[run.length - 1];
+        if (hit !== null && (!last || (Math.abs(t - last[0]) <= gapSmall && Math.abs(hit - last[1]) <= 2))) run.push([t, hit]);
+        else { close(); run = hit !== null ? [[t, hit]] : []; }
+      }
+      close();
+      if (!bestRun) return;
+      const midRun = bestRun[bestRun.length >> 1];
+      const seg = pass(mid, u[0], u[1], 0.35, 2, midRun[0], midRun[1]);
+      if (!seg || seg.length < 12) return;
+      const fs2 = fit(seg);
+      if (fs2.rms > 1.2 || Math.abs(fs2.b - f1.b) > 0.07) return;                    // phải thẳng và cùng hướng (lệch < 4°)
+      if (Math.abs(fs2.a + fs2.b * midRun[0] - lineO(midRun[0])) > 2 + 0.04 * Math.abs(midRun[0] - tFrom)) return;
+      const extra = fs2.inl.filter(q => sgn > 0 ? q[0] > tFrom : q[0] < tFrom);
+      if (extra.length < 12) return;
+      pts = sgn > 0 ? [...pts, ...extra] : [...extra, ...pts];
+      bridged = true;
+    };
+    bridge(+1);
+    bridge(-1);
+
+    const f2 = bridged ? fit(pts) : f1;
+    if (bridged) pts = f2.inl;
+    const n = pts.length, t0 = pts[0][0], t1 = pts[n - 1][0];
+    const at = t => [mid[0] + u[0] * t + nx * (f2.a + f2.b * t), mid[1] + u[1] * t + ny * (f2.a + f2.b * t)];
+    const top = at(t0), end = at(t1);
+    const len = Math.hypot(end[0] - top[0], end[1] - top[1]);
+    if (len < 1) return null;
+
+    const handleW = pct(pts.slice(0, Math.max(4, Math.ceil(n * 0.4))).map(q => q[2]), 0.75);   // cán kim ở phần trên
+    const endW  = pct(pts.slice(-8).map(q => q[2]), 0.5);
+    const cover = Math.min(1, n / Math.max(1, t1 - t0 + 1));
+    // Đoạn cuối (10% chiều dài) phải liền mạch thì điểm cuối mới đáng tin.
+    const tailFrom = t1 - Math.max(8, 0.1 * len);
+    const tail = pts.filter(q => q[0] >= tailFrom).length / (t1 - tailFrom + 1);
+    // Độ thẳng và độ liền tính trên đoạn đã dò trực tiếp; đoạn nối qua chỗ che không làm giảm điểm.
+    const span1 = f1.inl[f1.inl.length - 1][0] - f1.inl[0][0] + 1;
     return {
-      end: [top[0] + ux * lastT + nx * lastO, top[1] + uy * lastT + ny * lastO],
-      len: lastT, handleW, endW,
-      // Đáng tin khi vệt liền mạch và đoạn cuối mảnh hẳn so với cán (đúng là thân kim, không phải đáy cán).
-      ok: cover >= 0.75 && lastT > ext * 0.5 && endW <= Math.max(2, 0.6 * handleW),
+      top, end, len, rms: f1.rms, handleW, endW, bridged,
+      cover: Math.min(1, f1.inl.length / span1),
+      dir: [(end[0] - top[0]) / len, (end[1] - top[1]) / len],
+      // Điểm cuối đáng tin khi đoạn cuối liền mạch và mảnh hẳn so với cán (đúng là thân kim).
+      ok: tail >= 0.8 && f2.rms < 1.5 && endW <= Math.max(2, 0.6 * handleW) && (bridged || cover >= 0.75),
     };
   }
 

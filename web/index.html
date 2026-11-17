@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Acupuncture Monitor</title>
-  <link rel="stylesheet" href="css/style.css?v=13">
+  <link rel="stylesheet" href="css/style.css?v=14">
 </head>
 <body>
 
@@ -35,6 +35,7 @@
       <button id="btn-calib"  class="chip">HIỆU CHUẨN</button>
     </div>
     <div id="tap-hint" class="pill info" style="display:none"></div>
+    <div id="state-pill" class="pill" style="display:none" role="status"></div>
   </div>
 
   <!-- ── Trái: số đo hiện tại ── -->
@@ -106,9 +107,10 @@
       <div class="set-note">Khoảng cách do HIỆU CHUẨN tính ra; đo bằng thước từ ống kính tới chấm xanh để đối chiếu.
         Nếu lệch quá 10% thì chỉnh Góc nhìn camera (ống kính chính iPhone ≈ 63°) rồi hiệu chuẩn lại.</div>
 
-      <div class="set-title">Báo kết quả khi kim đứng yên 1 giây</div>
+      <div class="set-title">Báo hiệu</div>
+      <label class="set-check"><input id="opt-sound" type="checkbox" checked> Âm báo: “ting” khi sẵn sàng đo, “tong” khi đã chốt</label>
       <label class="set-check"><input id="opt-flash" type="checkbox" checked> Hiện số lớn trên màn hình</label>
-      <label class="set-check"><input id="opt-voice" type="checkbox"> Tiếng bíp và đọc kết quả bằng giọng nói</label>
+      <label class="set-check"><input id="opt-voice" type="checkbox"> Đọc kết quả bằng giọng nói</label>
     </div>
   </div>
 
@@ -143,8 +145,10 @@
         <h4>Luyện tập</h4>
         <ol>
           <li>Nhập MSSV ở góc trên trái, bấm <b>BẮT ĐẦU LUYỆN TẬP</b>.</li>
-          <li>Châm kim gần chấm xanh. Nếu không thấy vòng xanh ngọc (thân kim quá mờ) thì phải đâm trúng chấm xanh.</li>
-          <li>Buông tay: kim đứng yên 1 giây thì app tự chốt và báo kết quả. Rút kim ra để châm lần tiếp.</li>
+          <li>Cầm kim đặt mũi kim chạm da, giữ yên 1–2 giây tới khi nghe <b>“ting”</b> (app đã nhận diện ổn định
+              và lấy vị trí này làm mốc 0).</li>
+          <li>Châm kim rồi buông tay ra khỏi khung hình. Khi kim đứng yên và không còn tay, app kêu <b>“tong”</b>
+              và hiện kết quả. Rút kim ra để đo lần tiếp.</li>
           <li><b>KẾT THÚC</b> để xem biểu đồ, tải ảnh, tải CSV hoặc chia sẻ / gửi mail.</li>
         </ol>
         <h4>Lưu ý</h4>
@@ -179,9 +183,9 @@
   <div id="toast" class="toast" style="display:none" role="status"></div>
 
   <!-- ── Scripts ── -->
-  <script src="js/geometry.js?v=13"></script>
-  <script src="js/needle_detector.js?v=13"></script>
-  <script src="js/app.js?v=13"></script>
+  <script src="js/geometry.js?v=14"></script>
+  <script src="js/needle_detector.js?v=14"></script>
+  <script src="js/app.js?v=14"></script>
   <!-- OpenCV tải sau app.js để hàm onOpenCvScriptLoaded luôn tồn tại khi onload chạy -->
   <script async
     src="js/opencv.js"
