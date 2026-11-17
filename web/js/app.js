@@ -67,6 +67,7 @@ let tapMode     = null;    // null | 'skin' | 'region'
 let drag        = null;    // khung đang kéo khi khoanh vùng
 let suppressClick = false;
 
+let camMode = store.get('camMode', 'hd') === 'fast' ? 'fast' : 'hd';   // chế độ camera (xem openStream)
 let needleLenCm = clamp(store.get('needleLen', 5.1), 1, 20);   // đỉnh cán → mũi kim (cm)
 
 // Mọi toạ độ đo đạc quy về pixel của khung hình camera gốc ("src") → zoom / dời khung không ảnh hưởng.
@@ -208,13 +209,25 @@ function setTapMode(mode) {
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
-function openStream(deviceId) {
-  // Độ phân giải cao để còn chi tiết khi zoom số; 60 khung/giây (nếu máy hỗ trợ) để đo được cú châm nhanh
-  // (một cú châm 0,05 s lọt giữa hai khung hình ở 15–30 khung/giây).
-  const v = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
-  if (deviceId) v.deviceId = { exact: deviceId };
-  else          v.facingMode = { ideal: 'environment' };
-  return navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+/**
+ * Hai chế độ camera (chọn trong ⚙):
+ *  'hd'   — 1920×1080, thường 30 khung/s: chi tiết hơn khi zoom số.
+ *  'fast' — 1280×720, 60 khung/s: đo được cú châm nhanh (≤ 0,05 s) mà ở 30 khung/s lọt giữa hai khung.
+ *           Nhiều iPhone chỉ cho 60 khung/s ở 720p. Máy không hỗ trợ thì tự lùi về mức cao nhất có thể.
+ */
+async function openStream(deviceId) {
+  const fast = camMode === 'fast';
+  const base = fast ? { width: { ideal: 1280 }, height: { ideal: 720 } }
+                    : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
+  if (deviceId) base.deviceId = { exact: deviceId };
+  else          base.facingMode = { ideal: 'environment' };
+  if (fast) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { ideal: 60, min: 50 } }, audio: false });
+    } catch (_) { /* máy không cho ≥ 50 khung/s → lấy mức cao nhất có thể */ }
+    return navigator.mediaDevices.getUserMedia({ video: { ...base, frameRate: { ideal: 60 } }, audio: false });
+  }
+  return navigator.mediaDevices.getUserMedia({ video: base, audio: false });
 }
 
 async function listCameras() {
@@ -293,6 +306,7 @@ function stopCamera() {
   statePill.style.display = 'none';
   setTapMode(null);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  proc.n = 0; proc.t0 = 0; proc.fps = 0;
   $('cam-placeholder').style.display = 'block';
   btnCam.classList.remove('on');
   noDetect.style.display = 'none';
@@ -301,6 +315,16 @@ function stopCamera() {
 
 btnCam.addEventListener('click', () => { if (streaming) stopCamera(); else startCamera(); });
 $('cam-placeholder').addEventListener('click', () => startCamera());
+
+$('cam-mode').addEventListener('change', async e => {
+  camMode = e.target.value === 'fast' ? 'fast' : 'hd';
+  store.set('camMode', camMode);
+  // Đổi độ phân giải (và có thể cả góc nhìn của ống kính) → hiệu chuẩn cũ không còn khớp.
+  geometryChanged();
+  if (!streaming) return;
+  stopCamera();
+  await startCamera(camSelect.value || null);
+});
 
 camSelect.addEventListener('change', async () => {
   const id = camSelect.value;
@@ -343,9 +367,31 @@ async function recoverCamera() {
 /** Gọi khi kích thước khung hình gốc thay đổi (mở camera / đổi ống kính). */
 function onSourceSize(vw, vh) {
   srcW = vw;
-  let fps = '';
-  try { const st = video.srcObject.getVideoTracks()[0].getSettings(); if (st.frameRate) fps = ` · ${Math.round(st.frameRate)} khung/s`; } catch (_) {}
-  camInfo.textContent = `${camInfo.dataset.label || 'camera'} · ${vw}×${vh}${fps} · lấy nét: ${focusInfo}`;
+  showCamInfo();
+}
+/**
+ * Thông tin camera trong ⚙: độ phân giải, nhịp camera gửi, và nhịp app XỬ LÝ được thật
+ * (số khung camera mới được xử lý mỗi giây — tốc độ châm chính xác theo nhịp này).
+ */
+const proc = { n: 0, t0: 0, fps: 0 };
+function showCamInfo() {
+  let cfps = '', res = '';
+  try {
+    const st = video.srcObject.getVideoTracks()[0].getSettings();
+    if (st.frameRate) cfps = ` · camera ${Math.round(st.frameRate)} khung/s`;
+  } catch (_) {}
+  if (video.videoWidth) res = ` · ${video.videoWidth}×${video.videoHeight}`;
+  const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s` : '';
+  camInfo.textContent = `${camInfo.dataset.label || 'camera'}${res}${cfps}${p} · lấy nét: ${focusInfo}`;
+}
+function countProcessed(now) {
+  if (!proc.t0) proc.t0 = now;
+  proc.n++;
+  if (now - proc.t0 >= 1000) {
+    proc.fps = Math.round(proc.n * 1000 / (now - proc.t0));
+    proc.n = 0; proc.t0 = now;
+    showCamInfo();
+  }
 }
 
 // ── Vòng lặp khung hình ───────────────────────────────────────────────────────
@@ -438,6 +484,7 @@ function frameStep() {
       // khung trùng tạo các bước "đứng yên" giả trong lịch sử chuyển động, làm sai tốc độ.
       if (video.currentTime === lastVideoT && video.currentTime > 0) { delay = 6; return; }
       lastVideoT = video.currentTime;
+      countProcessed(now);
       const dt  = (now - lastFrameT) / 1000;
       lastFrameT = now;
       if (vw !== srcW) onSourceSize(vw, vh);
@@ -1364,6 +1411,7 @@ document.querySelectorAll('.modal').forEach(m => {
 (function init() {
   stuId.value  = practicing() ? session.id : store.get('mssv', '');
   tiltEl.value = geo.tiltDeg;
+  $('cam-mode').value = camMode;
   lenEl.value  = needleLenCm;
   zoomEl.value = view.zoom;
   $('opt-flash').checked = opts.flash;
