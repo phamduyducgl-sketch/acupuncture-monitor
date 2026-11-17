@@ -185,7 +185,51 @@ const Geo = (() => {
     return { speed: (hi - lo) / dur, dur };
   }
 
-  return { camera, ray, project, calibrate, angleOnly, pose, poseVisible, aboveSkinPx, median, strokeSpeed };
+  /**
+   * Tốc độ châm khi tay che kim: số đo tuyệt đối lúc còn tay không đáng tin, nhưng điểm đang được bám
+   * (đỉnh cán, hoặc mép ngón tay kẹp kim) chuyển động CỨNG cùng cây kim, nên quãng nó đi xuống là thật.
+   * Kim không thể đi xuống quá độ sâu cuối cùng sau khi chạm da, vậy nên `depth` cm đi xuống SAU CÙNG
+   * trước khi kim dừng chính là lần châm. Tốc độ = quãng 30% → 90% của đoạn đó chia cho thời gian đi hết.
+   * @param samples [{t (ms), r (cm, tăng khi kim đi xuống)}]
+   * @returns {{speed:number, dur:number}|null}
+   */
+  function descentSpeed(samples, depth, vMin = 0.5, vMax = 40, maxGapMs = 400) {
+    const n = samples.length;
+    if (n < 4 || !(depth > 0)) return null;
+    const m = samples.map((s, i) => median([samples[Math.max(0, i - 1)].r, s.r, samples[Math.min(n - 1, i + 1)].r]));
+    const down = i => {                                   // bước từ mẫu i-1 đến mẫu i là "đang đi xuống"
+      if (i < 1 || i >= n) return false;
+      const dt = samples[i].t - samples[i - 1].t;
+      const v = dt > 0 ? (m[i] - m[i - 1]) / (dt / 1000) : 0;
+      return dt <= maxGapMs && v > vMin && v < vMax;
+    };
+    // Điểm kim dừng: bước đi xuống cuối cùng (phải có bước liền kề cũng đi xuống để loại nhiễu đơn lẻ).
+    let e = -1;
+    for (let i = n - 1; i >= 1; i--) if (down(i) && (down(i - 1) || down(i + 1))) { e = i; break; }
+    if (e < 2) return null;
+    const mEnd = median(m.slice(e, Math.min(n, e + 3)));  // mức của điểm bám khi kim đã dừng
+    // Quy về "độ sâu giả" so với mức cuối: d = depth − (mEnd − m). Trước khi châm d ≤ 0, lúc dừng d = depth.
+    // Lấy quãng 30% → 90%: mẫu cuối cùng còn ≤ 30% rồi mẫu đầu tiên sau đó đạt ≥ 90%. Mốc dưới đặt cao (30%)
+    // để khi độ sâu chốt bị đo dư vài mm, mốc này vẫn rơi vào trong lần châm chứ không lùi về lúc đưa kim tới.
+    const d = i => depth - (mEnd - m[i]);
+    const lo = 0.3 * depth, hi = 0.9 * depth;
+    let iLo = -1;
+    for (let i = e; i >= 0; i--) if (d(i) <= lo) { iLo = i; break; }
+    if (iLo < 0) return null;                             // không thấy lúc kim còn ở ngoài da
+    let iHi = -1;
+    for (let i = iLo + 1; i <= Math.min(n - 1, e + 2); i++) if (d(i) >= hi) { iHi = i; break; }
+    if (iHi < 0) return null;
+    for (let i = iLo; i < iHi; i++) if (samples[i + 1].t - samples[i].t > maxGapMs) return null;   // mất dấu giữa lúc đâm
+    const cross = (i, level) => {
+      const a = d(i), b2 = d(i + 1), ta = samples[i].t, tb = samples[i + 1].t;
+      return b2 === a ? tb : ta + (tb - ta) * (level - a) / (b2 - a);
+    };
+    const dur = (cross(iHi - 1, hi) - cross(iLo, lo)) / 1000;
+    if (!(dur > 0.02)) return null;
+    return { speed: (hi - lo) / dur, dur };
+  }
+
+  return { camera, ray, project, calibrate, angleOnly, pose, poseVisible, aboveSkinPx, median, strokeSpeed, descentSpeed };
 })();
 
 if (typeof module === 'object' && module.exports) module.exports = Geo;

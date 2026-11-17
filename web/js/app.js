@@ -38,7 +38,7 @@ const TRACK_LONG  = 640;   // cạnh dài canvas khi đã zoom vào kim
 const HOLD_FRAMES = 10;    // số khung giữ kết quả cũ khi mất dấu tạm thời
 const MIN_DEPTH   = 0.15;  // độ sâu tối thiểu (cm) để tính là một lần châm
 const EMA_TAU     = 0.15;  // hằng số thời gian làm mượt số hiển thị (giây) — theo thời gian, không theo số khung
-const HIST_MS     = 20000; // giữ mẫu độ sâu thô bao lâu để tính tốc độ châm
+const HIST_MS     = 12000; // giữ lịch sử chuyển động của kim bao lâu để tính tốc độ châm
 const READY_MS    = 800;   // thấy kim trong tay ổn định bao lâu thì báo sẵn sàng ("ting")
 const QUIET_MS    = 450;   // khung hình phải yên (đã bỏ tay ra) bao lâu thì chốt ("tong")
 const GIVEUP_MS   = 1500;  // khung hình yên lâu như vậy mà không có kim cắm trên da → quay về chờ
@@ -86,7 +86,7 @@ const TIP_HOLD = 3;       // số khung còn tin điểm cuối kim sau lần d�
 const tipValid = () => !!track.tip && track.tipAge <= TIP_HOLD;
 const live   = { ema: null, shown: null, vel: 0, lastT: 0 };
 const att    = { phase: 'idle', hist: [], win: [], quiet: [], doneAt: 0, warnAt: 0 };
-const motion = { cv: document.createElement('canvas'), ctx: null, prev: null, key: '', lastBusy: 0 };
+const motion = { bg: null, prev: null, key: '', lastBusy: 0, lastMove: 0, hand: false, handSince: 0 };
 let poseNow  = null;       // tư thế kim của khung hiện tại (Geo.pose) hoặc null
 const vwatch = { t: -1, since: 0, seen: false, tried: false, busy: false };
 const opts   = { flash: store.get('optFlash', true), voice: store.get('optVoice', false), sound: store.get('optSound', true) };
@@ -160,9 +160,9 @@ function computePose() {
   const c  = cam();
   const pt = track.dir ? Geo.pose(c, s, geo.dist, track.top, track.dir, needleLenCm) : null;
   const pv = tipValid() ? Geo.poseVisible(c, s, geo.dist, track.top, track.tip, needleLenCm) : null;
-  if (pt) pt.mode = 'top';
+  if (pt) { pt.mode = 'top'; pt.topRaw = pt.raw; }
   if (!pv) return pt;
-  pv.mode = 'visible';
+  pv.mode = 'visible'; pv.topRaw = pt ? pt.raw : null;
   // Dò thân kim chỉ có thể sai theo hướng dừng SỚM (bị che) → phần nhìn thấy ngắn giả → độ sâu lớn giả.
   // Vì vậy 'visible' nhỏ hơn thì tin; lớn hơn 'top' quá MODE_GAP thì tin 'top'.
   return pt && pv.raw > pt.raw + MODE_GAP ? pt : pv;
@@ -419,6 +419,7 @@ function frameStep() {
       if (vw !== srcW) onSourceSize(vw, vh);
       layoutView(vw, vh);
       ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, canvas.width, canvas.height);
+      motionStep(now);
 
       const sk = skinSrc();
       const cs = canvas.width / roi.w;
@@ -442,7 +443,6 @@ function frameStep() {
                                           : 'Không tìm thấy kim — bấm VÙNG để khoanh quanh kim';
         noDetect.style.display = 'block';
       }
-      motionStep(now);
       attemptStep(now, r.found && r.fresh);
       updateView(r, vw, vh);
     }
@@ -490,33 +490,64 @@ function updateLive(now, dt) {
   liveEl.style.display = 'block';
 }
 
-// ── Nhận biết tay trong khung hình qua chuyển động ────────────────────────────
+// ── Nhận biết bàn tay trong khung hình ────────────────────────────────────────
 /**
- * So ảnh thu nhỏ của khung hiện tại với khung trước. Tay cầm kim luôn rung/nhúc nhích nên làm đổi nhiều ô;
- * kim cắm một mình trên da thì đứng yên tuyệt đối. motion.lastBusy = lần cuối khung hình còn chuyển động.
+ * Tay được nhận biết là một MẢNG LỚN khác với ảnh nền (cảnh khi không có tay), không phải bằng chuyển động
+ * giữa hai khung: nhiễu camera, lấy nét và phơi sáng tự động cũng làm ảnh "chuyển động" dù không có ai.
+ *  - Ảnh được chia ô và lấy trung bình từng ô (khử nhiễu), chuẩn hoá theo độ sáng trung bình.
+ *  - Có tay ⇔ hơn HAND_FRAC số ô lệch khỏi nền. Cây kim quá mảnh nên không bao giờ đạt mức này.
+ *  - Nền bám chậm theo ánh sáng khi không có tay; nếu "có tay" mà cảnh đứng im hẳn STALE_MS thì coi là
+ *    nền cũ đã sai (dời tấm da, dời máy, nền lấy lúc tay còn trong khung) và lấy lại nền.
+ * motion.lastBusy = lần cuối còn thấy tay.
  */
-function motionStep(now) {
-  const tw = 36, th = 64, m = motion;
-  if (!m.ctx) { m.cv.width = tw; m.cv.height = th; m.ctx = m.cv.getContext('2d', { willReadFrequently: true }); }
-  m.ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, tw, th);
-  const px = m.ctx.getImageData(0, 0, tw, th).data, n = tw * th;
-  const cur = new Float32Array(n);
-  let mean = 0;
-  for (let i = 0; i < n; i++) { cur[i] = (px[4 * i] + 2 * px[4 * i + 1] + px[4 * i + 2]) / 4; mean += cur[i]; }
-  mean = mean / n || 1;
-  const key = [roi.x, roi.y, roi.w].map(Math.round).join(',');
-  let changed = n;                                        // đổi khung nhìn → coi như có chuyển động
-  if (m.prev && m.key === key) {
-    changed = 0;
-    for (let i = 0; i < n; i++) {
-      cur[i] *= 128 / mean;                               // khử thay đổi phơi sáng toàn khung
-      if (Math.abs(cur[i] - m.prev[i]) > 12) changed++;
-    }
-  } else {
-    for (let i = 0; i < n; i++) cur[i] *= 128 / mean;
+const HAND_FRAC = 0.05, STALE_MS = 1200, HAND_MAX_MS = 15000;
+function handStep(cur, now, key) {
+  const m = motion, n = cur.length;
+  if (!m.bg || m.key !== key || m.bg.length !== n) {       // khung nhìn đổi → lấy nền mới
+    m.bg = cur.slice(); m.prev = cur; m.key = key; m.lastMove = now; m.hand = false;
+    return;
   }
-  if (changed > n * 0.015) m.lastBusy = now;
-  m.prev = cur; m.key = key;
+  let off = 0, moved = 0;
+  for (let i = 0; i < n; i++) {
+    if (Math.abs(cur[i] - m.bg[i]) > 14) off++;
+    if (Math.abs(cur[i] - m.prev[i]) > 8) moved++;
+  }
+  if (moved > n * 0.02) m.lastMove = now;
+  m.hand = off > n * HAND_FRAC;
+  if (m.hand) {
+    if (!m.handSince) m.handSince = now;
+    // Tay người không thể bất động hoàn toàn: cảnh đứng im hẳn STALE_MS nghĩa là không có tay, chỉ là nền cũ
+    // đã sai (cảnh đổi, hoặc nền lấy lúc tay còn trong khung) → lấy lại nền.
+    if (now - m.lastMove > STALE_MS || now - m.handSince > HAND_MAX_MS) { m.bg = cur.slice(); m.hand = false; }
+  }
+  if (m.hand) {
+    m.lastBusy = now;
+  } else {
+    m.handSince = 0;
+    for (let i = 0; i < n; i++) m.bg[i] += 0.1 * (cur[i] - m.bg[i]);
+  }
+  m.prev = cur;
+}
+/** Gọi ngay sau khi vẽ khung hình camera lên canvas, TRƯỚC khi vẽ đè các đường đánh dấu. */
+function motionStep(now) {
+  const W = canvas.width, H = canvas.height, cell = Math.max(4, Math.round(W / 36));
+  const gw = Math.floor(W / cell), gh = Math.floor(H / cell);
+  const px = ctx.getImageData(0, 0, gw * cell, gh * cell).data, rowLen = gw * cell * 4;
+  const cur = new Float32Array(gw * gh);
+  let mean = 0;
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      let sum = 0;
+      for (let y = 0; y < cell; y += 2) {                 // lấy mẫu cách 1 điểm: đủ khử nhiễu, nhẹ hơn 4 lần
+        let j = (gy * cell + y) * rowLen + gx * cell * 4;
+        for (let x = 0; x < cell; x += 2, j += 8) sum += px[j] + 2 * px[j + 1] + px[j + 2];
+      }
+      mean += cur[gy * gw + gx] = sum;
+    }
+  }
+  mean = mean / cur.length || 1;
+  for (let i = 0; i < cur.length; i++) cur[i] *= 128 / mean;     // khử thay đổi phơi sáng toàn khung
+  handStep(cur, now, [roi.x, roi.y, roi.w, gw, gh].map(Math.round).join(','));
 }
 
 // ── Một lần châm: thấy kim trong tay → "ting" → châm → bỏ tay ra → "tong" + kết quả ──
@@ -528,7 +559,6 @@ const PHASE_TEXT = {
 function setPhase(p) {
   att.phase = p;
   att.win = []; att.quiet = [];
-  if (p !== 'done') att.hist = [];
   statePill.textContent = PHASE_TEXT[p];
   statePill.className = 'pill' + (p === 'armed' ? ' ok' : p === 'done' ? ' info' : '');
 }
@@ -550,6 +580,11 @@ function attemptStep(now, fresh) {
   const ok    = fresh && !!poseNow;
   const quiet = now - motion.lastBusy;                    // khung hình đã yên được bao lâu (ms)
 
+  // Lịch sử vị trí điểm đang bám dọc theo kim (kể cả trước khi "ting": có thể châm ngay sau khi đưa kim vào).
+  // Chỉ ghi lúc còn chuyển động; dùng để tính tốc độ châm (xem Geo.descentSpeed).
+  if (ok && poseNow.topRaw != null && quiet < 250 && att.phase !== 'done') att.hist.push({ t: now, r: poseNow.topRaw });
+  while (att.hist.length && now - att.hist[0].t > HIST_MS) att.hist.shift();
+
   if (att.phase === 'idle') {
     att.win.push({ t: now, seen: fresh });
     while (att.win.length > 1 && now - att.win[0].t > READY_MS) att.win.shift();
@@ -567,16 +602,13 @@ function attemptStep(now, fresh) {
   }
 
   // armed
-  if (ok && poseNow.mode === 'visible') {                 // mẫu tin cậy (thấy cả cây kim) để tính tốc độ
-    att.hist.push({ t: now, d: poseNow.depth });
-    while (att.hist.length > 2 && now - att.hist[0].t > HIST_MS) att.hist.shift();
-  }
   if (quiet < 120) { att.quiet = []; return; }            // tay còn trong khung
   if (ok) att.quiet.push({ raw: poseNow.raw, ang: poseNow.angle, vis: poseNow.mode === 'visible' });
   if (quiet < QUIET_MS) return;
 
   const vis = att.quiet.filter(s => s.vis);
-  const use = vis.length >= 3 ? vis : att.quiet;          // ưu tiên cách đo theo phần kim nhìn thấy
+  // Thấy cả cây kim (chắc chắn kim đang đứng một mình) thì chốt ngay; chỉ thấy cán kim thì chờ yên lâu hơn.
+  const use = vis.length >= 3 ? vis : quiet > GIVEUP_MS * 0.8 ? att.quiet : [];
   if (use.length < 4) {
     if (quiet > GIVEUP_MS) setPhase('idle');              // không còn kim trong khung
     return;
@@ -593,13 +625,14 @@ function attemptStep(now, fresh) {
     return;
   }
   const depth = Math.min(needleLenCm, raw);
-  const sp = Geo.strokeSpeed(att.hist, depth);
+  const sp = Geo.descentSpeed(att.hist, depth);
+  att.hist = [];
   att.doneAt = now;
   setPhase('done');
   chime('tong');
   report({
     depth: Math.round(depth * 10) / 10,
-    speed: sp ? Math.round(sp.speed * 10) / 10 : null,   // null = không đo được (tay che kim lúc đâm)
+    speed: sp ? Math.round(sp.speed * 10) / 10 : null,   // null = không bám được chuyển động của kim lúc đâm
     angle: Math.round(Geo.median(use.map(s => s.ang))),
   });
 }

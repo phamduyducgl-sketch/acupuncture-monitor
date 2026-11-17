@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Acupuncture Monitor</title>
-  <link rel="stylesheet" href="css/style.css?v=15">
+  <link rel="stylesheet" href="css/style.css?v=17">
 </head>
 <body>
 
@@ -157,7 +157,8 @@
           <li>Một camera không thấy được chiều trước–sau: đâm lệch chấm xanh về phía gần/xa máy 1 cm, hoặc kim ngả
               về phía máy 10°, làm độ sâu sai 3–4 mm khi máy nghiêng 60°. Dựng máy càng đứng (80–85°) và kê tấm da
               lên ngang tầm ống kính thì sai số này giảm còn khoảng 1 mm.</li>
-          <li>Tốc độ hiện “—” khi tay che kim trong lúc đâm nên không đủ dữ liệu.</li>
+          <li>Tốc độ = độ sâu chia cho thời gian kim thực sự đi xuống trong lần châm, tính từ chuyển động của cán kim
+              (hoặc của ngón tay kẹp kim). Hiện “—” khi app mất dấu kim suốt lúc đâm.</li>
           <li>Khi ngón tay che đỉnh cán kim, số đo tạm thời không chính xác; kết quả chỉ được chốt khi kim đứng yên.</li>
         </ul>
       </div>
@@ -183,9 +184,9 @@
   <div id="toast" class="toast" style="display:none" role="status"></div>
 
   <!-- ── Scripts ── -->
-  <script src="js/geometry.js?v=15"></script>
-  <script src="js/needle_detector.js?v=15"></script>
-  <script src="js/app.js?v=15"></script>
+  <script src="js/geometry.js?v=17"></script>
+  <script src="js/needle_detector.js?v=17"></script>
+  <script src="js/app.js?v=17"></script>
   <!-- OpenCV tải sau app.js để hàm onOpenCvScriptLoaded luôn tồn tại khi onload chạy -->
   <script async
     src="js/opencv.js"

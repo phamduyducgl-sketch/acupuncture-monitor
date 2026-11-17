@@ -238,6 +238,7 @@ class NeedleDetector {
     const m   = Math.max(8, Math.round(this._kSize * 0.6));   // nửa bề rộng mặt cắt
     const N   = 2 * m + 1;
     const thr = this.minContrast * 0.8;
+    const maxW = Math.max(6, Math.round(N * 0.4));       // bề rộng lớn nhất còn coi là cán kim
     const gapSmall = Math.max(5, Math.round(0.02 * H)); // khe hở thường (lóe sáng trên thân kim)
     const prof = new Float32Array(N), prof2 = new Float32Array(N), dev = new Float32Array(N);
 
@@ -269,6 +270,9 @@ class NeedleDetector {
         if (ip < 0 || Math.abs(p) < thr) return null;
         {
           const bl = (ch[0] + ch[1] + ch[2]) / 3, br = (ch[N - 1] + ch[N - 2] + ch[N - 3]) / 3;
+          // Mép ngón tay là một BẬC THANG (hai bên là hai nền khác nhau): so với đường nội suy nó cũng tạo ra
+          // một "đỉnh" cao bằng nửa bậc. Vệt kim thật phải nổi rõ hơn hẳn độ chênh giữa hai nền.
+          if (Math.abs(p) < 0.8 * Math.abs(br - bl)) return null;
           for (let i = 0; i < N; i++) dev[i] = ch[i] - (bl + (br - bl) * i / (N - 1));
         }
         const half = Math.abs(p) * 0.5, sg = Math.sign(p);
@@ -276,6 +280,7 @@ class NeedleDetector {
         while (i0 > 0     && dev[i0 - 1] * sg > half) i0--;
         while (i1 < N - 1 && dev[i1 + 1] * sg > half) i1++;
         if (i0 <= 2 || i1 >= N - 3) return null;          // vệt chạm mép → không phải vật mảnh
+        if (i1 - i0 + 1 > maxW) return null;              // quá rộng so với một cây kim
         let sw = 0, sx = 0;
         for (let i = i0; i <= i1; i++) { sw += dev[i] * sg; sx += dev[i] * sg * i; }
         return { o: oc + sx / sw - m, w: i1 - i0 + 1 };
