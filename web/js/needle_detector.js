@@ -104,10 +104,10 @@ class NeedleDetector {
       // ── Lọc đoạn đủ dốc ──
       const sinMin = Math.sin(this.minIncline * Math.PI / 180);
       const segs = [];
-      const n = Math.min(lines.rows, 500);
+      const n = Math.min(lines.rows, 500), LD = lines.data32S;      // lấy mảng một lần (xem _colorNeedle)
       for (let i = 0; i < n; i++) {
-        let x1 = lines.data32S[i * 4]     + X0, y1 = lines.data32S[i * 4 + 1] + Y0;
-        let x2 = lines.data32S[i * 4 + 2] + X0, y2 = lines.data32S[i * 4 + 3] + Y0;
+        let x1 = LD[i * 4]     + X0, y1 = LD[i * 4 + 1] + Y0;
+        let x2 = LD[i * 4 + 2] + X0, y2 = LD[i * 4 + 3] + Y0;
         if (y2 < y1) { [x1, x2] = [x2, x1]; [y1, y2] = [y2, y1]; }   // (x1,y1) là đầu trên
         const len = Math.hypot(x2 - x1, y2 - y1);
         if (len < 1) continue;
@@ -485,7 +485,10 @@ class NeedleDetector {
     const k = cv.Mat.ones(3, 3, cv.CV_8U);
     let best = null;
     try {
-      for (let i = 0; i < cls.length; i++) mask.data[i] = cls[i] ? 255 : 0;
+      // Lấy mảng dữ liệu MỘT lần: trong OpenCV.js mỗi lần đọc mat.data lại tạo một đối tượng mới,
+      // đọc trong vòng lặp 200 nghìn điểm ảnh làm mỗi khung chậm thêm hàng chục ms.
+      const md = mask.data;
+      for (let i = 0; i < cls.length; i++) md[i] = cls[i] ? 255 : 0;
       cv.dilate(mask, mask, k);
       const n = cv.connectedComponentsWithStats(mask, lab, stats, cent, 8, cv.CV_32S);
       const L = lab.data32S;

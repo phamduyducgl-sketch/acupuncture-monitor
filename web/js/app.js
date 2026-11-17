@@ -373,7 +373,9 @@ function onSourceSize(vw, vh) {
  * Thông tin camera trong ⚙: độ phân giải, nhịp camera gửi, và nhịp app XỬ LÝ được thật
  * (số khung camera mới được xử lý mỗi giây — tốc độ châm chính xác theo nhịp này).
  */
-const proc = { n: 0, t0: 0, fps: 0 };
+const proc = { n: 0, t0: 0, fps: 0, ms: [0, 0, 0] };
+/** Thời gian trung bình (làm mượt) của từng bước mỗi khung: đọc ảnh, nhận diện kim, phần còn lại. */
+function timeStages(...ms) { ms.forEach((v, i) => { proc.ms[i] += 0.1 * (v - proc.ms[i]); }); }
 function showCamInfo() {
   let cfps = '', res = '';
   try {
@@ -381,7 +383,9 @@ function showCamInfo() {
     if (st.frameRate) cfps = ` · camera ${Math.round(st.frameRate)} khung/s`;
   } catch (_) {}
   if (video.videoWidth) res = ` · ${video.videoWidth}×${video.videoHeight}`;
-  const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s` : '';
+  const st = proc.ms;
+  const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s (mỗi khung: đọc ảnh ${st[0].toFixed(0)} ms, ` +
+                       `nhận diện ${st[1].toFixed(0)} ms, còn lại ${st[2].toFixed(0)} ms)` : '';
   camInfo.textContent = `${camInfo.dataset.label || 'camera'}${res}${cfps}${p} · lấy nét: ${focusInfo}`;
 }
 function countProcessed(now) {
@@ -489,12 +493,17 @@ function frameStep() {
       lastFrameT = now;
       if (vw !== srcW) onSourceSize(vw, vh);
       layoutView(vw, vh);
+      const t0 = performance.now();
       ctx.drawImage(video, roi.x, roi.y, roi.w, roi.h, 0, 0, canvas.width, canvas.height);
-      motionStep(now);
+      // Đọc điểm ảnh MỘT lần, dùng chung cho dò tay và nhận diện kim (đọc từ canvas là bước tốn kém).
+      const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const t1 = performance.now();
+      motionStep(now, frame);
 
       const sk = skinSrc();
       const cs = canvas.width / roi.w;
-      const r  = trackUpdate(detector.detect(canvas, {
+      const t2 = performance.now();
+      const r  = trackUpdate(detector.detect(frame, {
         hint:    track.top ? srcToCanvas(track.top[0], track.top[1]) : null,
         hintDir: track.top && track.dir ? track.dir : null,
         hintLen: track.top && track.bottom ? Math.hypot(track.bottom[0] - track.top[0], track.bottom[1] - track.top[1]) * cs : 0,
@@ -503,6 +512,7 @@ function frameStep() {
         scale:  cs,
         learn:  wantLearn,
       }), lastRaw => { if (lastRaw.learned) wantLearn = false; showLock(); });
+      const t3 = performance.now();
 
       drawRegion();
       drawSkin();
@@ -518,6 +528,7 @@ function frameStep() {
       }
       attemptStep(now, r.found && r.fresh);
       updateView(r, vw, vh);
+      timeStages(t1 - t0, t3 - t2, performance.now() - t0 - (t1 - t0) - (t3 - t2));
     }
   } catch (e) {
     console.error('frameStep error:', e);
@@ -629,10 +640,10 @@ function handStep(cur, now, key) {
   m.prev = cur;
 }
 /** Gọi ngay sau khi vẽ khung hình camera lên canvas, TRƯỚC khi vẽ đè các đường đánh dấu. */
-function motionStep(now) {
-  const W = canvas.width, H = canvas.height, cell = Math.max(4, Math.round(W / 36));
+function motionStep(now, frame) {
+  const W = frame.width, H = frame.height, cell = Math.max(4, Math.round(W / 36));
   const gw = Math.floor(W / cell), gh = Math.floor(H / cell);
-  const px = ctx.getImageData(0, 0, gw * cell, gh * cell).data, rowLen = gw * cell * 4;
+  const px = frame.data, rowLen = W * 4;
   const cur = new Float32Array(gw * gh);
   let mean = 0;
   for (let gy = 0; gy < gh; gy++) {
