@@ -307,7 +307,7 @@ function stopCamera() {
   statePill.style.display = 'none';
   setTapMode(null);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  proc.n = 0; proc.t0 = 0; proc.fps = 0;
+  proc.n = 0; proc.t0 = 0; proc.fps = 0; proc.wait = 0; proc.end = 0;
   resetGrab();                                // luồng camera mới có thể nhanh/chậm khác → thử lại
   $('cam-placeholder').style.display = 'block';
   btnCam.classList.remove('on');
@@ -375,7 +375,7 @@ function onSourceSize(vw, vh) {
  * Thông tin camera trong ⚙: độ phân giải, nhịp camera gửi, và nhịp app XỬ LÝ được thật
  * (số khung camera mới được xử lý mỗi giây — tốc độ châm chính xác theo nhịp này).
  */
-const proc = { n: 0, t0: 0, fps: 0, ms: [0, 0, 0] };
+const proc = { n: 0, t0: 0, fps: 0, ms: [0, 0, 0], wait: 0, end: 0 };
 
 /**
  * Lấy khung hình camera (vùng đang xem, thu về cỡ canvas) thành mảng điểm ảnh và hiện lên canvas.
@@ -428,7 +428,8 @@ function showCamInfo() {
   const st = proc.ms;
   const how = grab.method ? `, cách ${grab.method.toUpperCase()} — thử: ${grab.cmp}` : ', đang thử cách đọc';
   const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s (mỗi khung: đọc ảnh ${st[0].toFixed(0)} ms${how}; ` +
-                       `nhận diện ${st[1].toFixed(0)} ms; còn lại ${st[2].toFixed(0)} ms)` : '';
+                       `nhận diện ${st[1].toFixed(0)} ms; còn lại ${st[2].toFixed(0)} ms; ` +
+                       `chờ khung mới ${proc.wait.toFixed(0)} ms)` : '';
   camInfo.textContent = `${camInfo.dataset.label || 'camera'}${res}${cfps}${p} · lấy nét: ${focusInfo}`;
 }
 function countProcessed(now) {
@@ -531,6 +532,7 @@ function frameStep() {
       // khung trùng tạo các bước "đứng yên" giả trong lịch sử chuyển động, làm sai tốc độ.
       if (video.currentTime === lastVideoT && video.currentTime > 0) { delay = 6; return; }
       lastVideoT = video.currentTime;
+      if (proc.end) proc.wait += 0.1 * (now - proc.end - proc.wait);   // thời gian chờ có khung mới từ camera
       countProcessed(now);
       const dt  = (now - lastFrameT) / 1000;
       lastFrameT = now;
@@ -570,7 +572,8 @@ function frameStep() {
       }
       attemptStep(now, r.found && r.fresh);
       updateView(r, vw, vh);
-      timeStages(t1 - t0, t3 - t2, performance.now() - t0 - (t1 - t0) - (t3 - t2));
+      proc.end = performance.now();
+      timeStages(t1 - t0, t3 - t2, proc.end - t0 - (t1 - t0) - (t3 - t2));
     }
   } catch (e) {
     console.error('frameStep error:', e);

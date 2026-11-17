@@ -3,7 +3,7 @@
 
 :root {
   --accent: #58a6ff;
-  --glass:  rgba(13,17,23,0.62);
+  --glass:  rgba(13,17,23,0.72);   /* không làm mờ nền (tốn công mỗi khung hình) → nền đậm hơn để dễ đọc */
   --line:   rgba(255,255,255,0.28);
   --sheet:  #161b22;
   --sheet-text: #e6edf3;
@@ -29,14 +29,17 @@ button, input, select { font-family: inherit; }
 
 /* ── Camera ── */
 .cam-wrap { position: fixed; inset: 0; background: #000; }
-#video  { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+/* Video phủ đúng vùng canvas, nằm DƯỚI canvas: vẫn bị canvas che hoàn toàn, nhưng Safari coi là đang hiển thị
+   nên không giảm nhịp cập nhật khung hình (video 1×1 trong suốt có thể bị giảm nhịp). */
+#video  { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; pointer-events: none; }
 #canvas {
+  position: absolute; inset: 0; z-index: 1;
   width: 100%; height: 100%; display: block;
   object-fit: cover;
   touch-action: manipulation; cursor: crosshair;
 }
 .cam-placeholder {
-  position: absolute; inset: 0; border: none; background: transparent;
+  position: absolute; inset: 0; z-index: 2; border: none; background: transparent;
   color: #8b949e; font-size: 1.05rem; line-height: 1.8; cursor: pointer;
 }
 
@@ -68,7 +71,6 @@ button, input, select { font-family: inherit; }
   border: 1px solid var(--line); border-radius: 9px;
   padding: 0 10px; font-size: 16px;         /* 16px: iOS không tự phóng to khi nhập */
   outline: none; -webkit-appearance: none;
-  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
 }
 #stu-id::placeholder { color: rgba(255,255,255,0.6); }
 #stu-id:focus { border-color: var(--accent); }
@@ -81,7 +83,6 @@ button, input, select { font-family: inherit; }
   font-size: 0.72rem; font-weight: 700; letter-spacing: .02em; white-space: nowrap;
   cursor: pointer; touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
-  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
 }
 .chip:active { filter: brightness(1.4); }
 .chip.icon { width: 36px; flex: none; padding: 0; font-size: 1rem; }
@@ -123,7 +124,6 @@ button, input, select { font-family: inherit; }
   background: var(--glass); border: 1px solid var(--line); border-radius: 11px;
   text-align: center; pointer-events: none;
   font-variant-numeric: tabular-nums;
-  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
 }
 .side.left  { left:  calc(6px + env(safe-area-inset-left)); }
 .side.right { right: calc(6px + env(safe-area-inset-right)); border-color: rgba(63,185,80,0.7); }
