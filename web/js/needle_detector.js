@@ -38,10 +38,12 @@ class NeedleDetector {
    * @param   {number}               opts.hintLen - chiều dài kim trên ảnh ở khung trước (pixel canvas)
    * @param   {[number,number]|null} opts.skin   - điểm châm trên da (pixel canvas)
    * @param   {number[]|null}        opts.region - [x0, y0, x1, y1] vùng khoanh (pixel canvas)
+   * @param   {number}               opts.scale  - pixel canvas trên 1 pixel khung gốc (để mẫu đốc kim đúng cỡ khi zoom)
+   * @param   {boolean}              opts.learn  - ghi nhớ mẫu đốc kim từ kết quả của khung này (nếu tìm thấy)
    * @returns {{found, top, bottom, incline, lengthPx, tip, tipOk}}
    *   tip = điểm cuối nhìn thấy của cây kim; tipOk = đoạn cuối đúng là thân kim mảnh (đáng tin)
    */
-  detect(canvas, { hint = null, hintDir = null, hintLen = 0, skin = null, region = null } = {}) {
+  detect(canvas, { hint = null, hintDir = null, hintLen = 0, skin = null, region = null, scale = 1, learn = false } = {}) {
     const result = { found: false, top: null, bottom: null, incline: 90, lengthPx: 0, tip: null, tipOk: false };
     const mats = [];
     const M = m => { mats.push(m); return m; };
@@ -56,6 +58,18 @@ class NeedleDetector {
       }
 
       const src = M(canvas.data ? cv.matFromImageData(canvas) : cv.imread(canvas));   // RGBA
+
+      // ── Kim có đốc sơn màu (đầu xanh da trời + cán xanh lá): bám theo màu, chắc chắn nhất ──
+      const col = this._colorNeedle(src, [X0, Y0, X1, Y1], hint, hintDir);
+      if (col) {
+        this.colorHits = Math.min(30, (this.colorHits || 0) + 1);
+        if (this.colorHits >= 8) this.colorLock = true;
+        Object.assign(result, col);
+        if (learn) result.learned = true;
+        return result;
+      }
+      this.colorHits = 0;
+      if (this.colorLock) return result;     // đã khoá theo màu: không thấy màu thì báo mất dấu, không đoán bừa
       const roiRect = new cv.Rect(X0, Y0, X1 - X0, Y1 - Y0);
       const planes  = M(new cv.MatVector());
       cv.split(src, planes);
@@ -111,6 +125,7 @@ class NeedleDetector {
       const bounds = [X0, Y0, X1, Y1];
       let best = null, bestScore = 0;
       const tried = [];
+      const sigHw = this.sig && !learn ? this.sig.hwSrc * (scale || 1) : 0;   // bề rộng cán kim đã khoá (pixel canvas)
 
       // Hạt giống đầu tiên: vị trí và hướng kim ở khung trước (nếu có) — giữ được kim khi tay làm mất đoạn Hough.
       const seeds = [...segs.slice(0, 8), ...this._scanSeeds(src, bounds, sinMin)];
@@ -135,6 +150,14 @@ class NeedleDetector {
         if (!tr) continue;
         tried.push(tr);
         if (tr.len < minExtent || tr.dir[1] < sinMin) continue;
+        if (sigHw) {
+          if (tr.handleW < 0.5 * sigHw - 1 || tr.handleW > 1.8 * sigHw + 1) continue;      // không phải cây kim đã khoá
+          if (hint && hintDir) {
+            const lat = Math.abs((tr.top[0] - hint[0]) * hintDir[1] - (tr.top[1] - hint[1]) * hintDir[0]);
+            const ang = Math.abs(tr.dir[0] * hintDir[1] - tr.dir[1] * hintDir[0]);
+            if (lat > Math.max(4, 1.5 * sigHw) || ang > 0.14) continue;                   // lệch khỏi trục kim cũ
+          }
+        }
 
         let score = tr.len * tr.cover * tr.dir[1] * tr.dir[1] / (1 + tr.rms * tr.rms);   // dài, liền, thẳng, dựng đứng
         if (hint) {
@@ -165,6 +188,7 @@ class NeedleDetector {
       result.tip      = best.end;
       result.tipOk    = best.ok;
       result.quality  = { cover: best.cover, rms: best.rms, handleW: best.handleW, endW: best.endW };
+      if (learn) result.learned = this._learn(src, best.top, best.dir, best.handleW, scale);
 
     } catch (e) {
       console.error('NeedleDetector.detect error:', e);
@@ -407,6 +431,145 @@ class NeedleDetector {
       dir: [(end[0] - top[0]) / len, (end[1] - top[1]) / len],
       // Điểm cuối đáng tin khi đoạn cuối liền mạch và mảnh hẳn so với cán (đúng là thân kim).
       ok: tail >= 0.8 && f2.rms < 1.5 && endW <= Math.max(2, 0.6 * handleW) && (bridged || cover >= 0.75),
+    };
+  }
+
+  /**
+   * Khoá nhận diện vào cây kim đã ghi nhớ: lưu bề rộng cán kim (pixel khung gốc). Khi đã khoá:
+   *  - chỉ nhận vật có bề rộng cán gần đúng cây kim đó (loại mép và nếp ngón tay, vốn rộng hơn hẳn);
+   *  - đang bám kim thì chỉ nhận ứng viên nằm trên đúng trục kim cũ (kim chỉ trượt dọc trục khi châm),
+   *    không bao giờ nhảy sang một vật song song bên cạnh.
+   */
+  _learn(src, top, dir, handleW, scale) {
+    if (!(handleW > 0)) return false;
+    this.sig = { hwSrc: handleW / (scale || 1) };
+    return true;
+  }
+  forget() { this.sig = null; this.colorLock = false; this.colorHits = 0; }
+  get locked() { return !!this.sig || !!this.colorLock; }
+  get colorLocked() { return !!this.colorLock; }
+
+  /**
+   * Tìm kim có đốc sơn màu: đầu tròn xanh da trời (đỉnh kim) + cán xanh lá.
+   * Hai màu này khác hẳn da, tay, nền đen, nền trắng và mặt bàn gỗ (đã đo trên ảnh thật), nên không bị
+   * nhầm sang ngón tay. Trục kim lấy từ hình dạng vệt màu (phân tích thành phần chính), đỉnh kim là điểm
+   * cao nhất của phần xanh da trời dọc theo trục; sau đó dò tiếp thân kim thép bên dưới để lấy điểm cuối.
+   * @returns kết quả giống detect() hoặc null nếu không thấy vệt màu nào hợp lệ
+   */
+  _colorNeedle(src, bounds, hint, hintDir) {
+    const d = src.data, W = src.cols, H = src.rows;
+    const [X0, Y0, X1, Y1] = bounds, w = X1 - X0, h = Y1 - Y0;
+    if (w < 8 || h < 8) return null;
+    // Phân loại điểm ảnh theo HSV (thang OpenCV: H 0–180).
+    const cls = new Uint8Array(w * h);
+    let nBlue = 0;
+    for (let y = 0; y < h; y++) {
+      let j = ((Y0 + y) * W + X0) * 4;
+      for (let x = 0; x < w; x++, j += 4) {
+        const r = d[j], g = d[j + 1], b = d[j + 2];
+        const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        const c = mx - mn;
+        if (mx < 45 || c * 255 < 60 * mx) continue;      // quá tối hoặc quá nhạt màu
+        let hue;
+        if (mx === r) hue = 30 * (g - b) / c; else if (mx === g) hue = 60 + 30 * (b - r) / c; else hue = 120 + 30 * (r - g) / c;
+        if (hue < 0) hue += 180;
+        if (hue >= 92 && hue <= 114 && mx >= 70 && c * 255 >= 90 * mx) { cls[y * w + x] = 1; nBlue++; }
+        else if (hue >= 42 && hue <= 88) cls[y * w + x] = 2;
+      }
+    }
+    if (nBlue < 4) return null;
+
+    // Gom vùng liền (cho phép khe hở nhỏ giữa đầu xanh dương và cán xanh lá) bằng OpenCV.
+    const mask = new cv.Mat(h, w, cv.CV_8UC1), lab = new cv.Mat(), stats = new cv.Mat(), cent = new cv.Mat();
+    const k = cv.Mat.ones(3, 3, cv.CV_8U);
+    let best = null;
+    try {
+      for (let i = 0; i < cls.length; i++) mask.data[i] = cls[i] ? 255 : 0;
+      cv.dilate(mask, mask, k);
+      const n = cv.connectedComponentsWithStats(mask, lab, stats, cent, 8, cv.CV_32S);
+      const L = lab.data32S;
+      // Thống kê từng vùng trên các điểm có màu thật (không tính phần nở ra do dilate).
+      const acc = Array.from({ length: n }, () => ({ nb: 0, ng: 0, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0 }));
+      for (let i = 0; i < cls.length; i++) {
+        if (!cls[i]) continue;
+        const a = acc[L[i]], x = i % w, y = (i / w) | 0;
+        if (cls[i] === 1) a.nb++; else a.ng++;
+        a.sx += x; a.sy += y; a.sxx += x * x; a.syy += y * y; a.sxy += x * y;
+      }
+      const diag = Math.hypot(W, H);
+      for (let lb = 1; lb < n; lb++) {
+        const a = acc[lb], N = a.nb + a.ng;
+        if (a.nb < 4 || N < 12) continue;
+        const cx = a.sx / N, cy = a.sy / N;
+        const vxx = a.sxx / N - cx * cx, vyy = a.syy / N - cy * cy, vxy = a.sxy / N - cx * cy;
+        const tr = vxx + vyy, det = vxx * vyy - vxy * vxy, disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+        const l1 = tr / 2 + disc, l2 = Math.max(0.25, tr / 2 - disc);
+        let ux = vxy, uy = l1 - vxx;
+        if (Math.abs(ux) + Math.abs(uy) < 1e-9) { ux = vxx >= vyy ? 1 : 0; uy = vxx >= vyy ? 0 : 1; }
+        let un = Math.hypot(ux, uy); ux /= un; uy /= un;
+        if (uy < 0) { ux = -ux; uy = -uy; }
+        const elong = Math.sqrt(l1 / l2);
+        const rod = elong >= 3;
+        // Vệt quá ngắn (chỉ thấy đầu tròn): hướng lấy theo khung trước, hoặc coi như dựng đứng.
+        if (!rod) { if (hintDir) { ux = hintDir[0]; uy = hintDir[1]; } else { ux = 0; uy = 1; } }
+        if (uy < Math.sin(this.minIncline * Math.PI / 180)) continue;
+        let score = N * Math.min(elong, 12);
+        const gx = X0 + cx, gy = Y0 + cy;
+        if (hint) {
+          const dd = Math.hypot(gx - hint[0], gy - hint[1]) / (0.15 * diag);
+          score /= 1 + dd * dd;
+        }
+        if (!best || score > best.score) best = { lb, score, cx, cy, ux, uy, N, rod };
+      }
+      if (!best) return null;
+      // Đỉnh kim = điểm cao nhất (dọc theo trục) của phần xanh da trời; đáy phần sơn = điểm thấp nhất.
+      let tMin = Infinity, tMax = -Infinity;
+      for (let i = 0; i < cls.length; i++) {
+        if (!cls[i] || L[i] !== best.lb) continue;
+        const x = i % w, y = (i / w) | 0, t = (x - best.cx) * best.ux + (y - best.cy) * best.uy;
+        if (cls[i] === 1 && t < tMin) tMin = t;
+        if (t > tMax) tMax = t;
+      }
+      best.tMin = tMin; best.tMax = tMax;
+    } finally { mask.delete(); lab.delete(); stats.delete(); cent.delete(); k.delete(); }
+
+    const { cx, cy, tMin, tMax, N } = best;
+    let { ux, uy } = best;
+    const top = [X0 + cx + ux * tMin, Y0 + cy + uy * tMin];
+    const handleEnd = [X0 + cx + ux * tMax, Y0 + cy + uy * tMax];
+    const handleW = Math.max(1, N / Math.max(1, tMax - tMin));
+
+    // Thân kim thép bên dưới phần sơn: dò tiếp để lấy điểm cuối nhìn thấy (mũi kim / điểm đâm vào da).
+    let end = null, tipOk = false, q = { cover: 1, rms: 0, handleW, endW: 0 };
+    // Ngón tay có thể che ngay dưới phần sơn → thử thêm các điểm xuất phát thấp hơn dọc trục.
+    const okTr = c => c && Math.abs(c.dir[0] * uy - c.dir[1] * ux) < 0.14 &&
+      Math.abs((top[0] - c.end[0]) * c.dir[1] - (top[1] - c.end[1]) * c.dir[0]) < Math.max(4, 2 * handleW) &&
+      (c.end[0] - handleEnd[0]) * ux + (c.end[1] - handleEnd[1]) * uy > 0;
+    let tr = null;
+    for (const k0 of [Math.max(4, handleW * 1.5), 0.08 * H, 0.16 * H, 0.25 * H]) {
+      const px = handleEnd[0] + ux * k0, py = handleEnd[1] + uy * k0;
+      if (px < 0 || py < 0 || px >= W || py >= H) break;
+      const c = this._trace(src, [px, py], [ux, uy], [0, 0, W, H]);
+      if (!okTr(c)) continue;
+      // Ưu tiên lần dò tới được mũi kim thật (đoạn cuối mảnh), rồi tới lần dò đi xa nhất.
+      const far = (c.end[0] - handleEnd[0]) * ux + (c.end[1] - handleEnd[1]) * uy;
+      if (!tr || (c.ok && !tr.ok) || (c.ok === tr.ok && far > tr.far)) { tr = c; tr.far = far; }
+      if (tr.ok) break;
+    }
+    if (tr) {
+      end = tr.end; tipOk = tr.ok;
+      q = { cover: tr.cover, rms: tr.rms, handleW, endW: tr.endW };
+      // Trục dài từ đỉnh tới điểm cuối cho hướng chính xác hơn trục của riêng phần sơn.
+      const dx = end[0] - top[0], dy = end[1] - top[1], dn = Math.hypot(dx, dy);
+      if (dn > 2 * (tMax - tMin)) { ux = dx / dn; uy = dy / dn; }
+    }
+    const bottom = end || handleEnd;
+    return {
+      found: true, color: true, top, dir: [ux, uy], bottom, tip: end, tipOk,
+      lengthPx: Math.hypot(bottom[0] - top[0], bottom[1] - top[1]),
+      incline: Math.atan2(Math.abs(uy), Math.abs(ux)) * 180 / Math.PI,
+      quality: q,
     };
   }
 

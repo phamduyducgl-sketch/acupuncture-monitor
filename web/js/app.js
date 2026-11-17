@@ -39,9 +39,12 @@ const HOLD_FRAMES = 10;    // số khung giữ kết quả cũ khi mất dấu t
 const MIN_DEPTH   = 0.15;  // độ sâu tối thiểu (cm) để tính là một lần châm
 const EMA_TAU     = 0.15;  // hằng số thời gian làm mượt số hiển thị (giây) — theo thời gian, không theo số khung
 const HIST_MS     = 12000; // giữ lịch sử chuyển động của kim bao lâu để tính tốc độ châm
-const READY_MS    = 800;   // thấy kim trong tay ổn định bao lâu thì báo sẵn sàng ("ting")
-const QUIET_MS    = 450;   // khung hình phải yên (đã bỏ tay ra) bao lâu thì chốt ("tong")
-const GIVEUP_MS   = 1500;  // khung hình yên lâu như vậy mà không có kim cắm trên da → quay về chờ
+const READY_MS    = 800;   // thấy kim ổn định bao lâu (chưa cắm vào da) thì báo sẵn sàng ("ting")
+const READY_DEPTH = 0.2;   // mũi kim chưa sâu quá mức này (cm) mới coi là "chưa châm"
+const QUIET_MS    = 500;   // đã bỏ tay: độ sâu đứng yên bao lâu thì chốt ("tong")
+const HOLD_LOCK_MS = 2000; // còn tay nhưng độ sâu đứng yên bao lâu thì cũng chốt
+const STEADY_CM   = 0.12;  // dao động tối đa (cm) trong khoảng đó vẫn coi là đứng yên
+const LOST_MS     = 1500;  // mất dấu kim lâu hơn thế → coi như kim đã rời khung
 const CONFIRM_N   = 4;     // vị trí kim nhảy xa phải lặp lại bấy nhiêu khung liên tiếp mới được nhận
 
 const detector       = new NeedleDetector();
@@ -85,7 +88,8 @@ const track  = { top: null, bottom: null, dir: null, deg: 90, misses: 0, tip: nu
 const TIP_HOLD = 3;       // số khung còn tin điểm cuối kim sau lần dò được gần nhất
 const tipValid = () => !!track.tip && track.tipAge <= TIP_HOLD;
 const live   = { ema: null, shown: null, vel: 0, lastT: 0 };
-const att    = { phase: 'idle', hist: [], win: [], quiet: [], doneAt: 0, warnAt: 0 };
+const att    = { phase: 'idle', hist: [], win: [], buf: [], lastSeen: 0, outSince: 0, warnAt: 0 };
+let wantLearn = false, learnRun = 0;   // ghi nhớ (khoá) cây kim ở khung tới / đếm khung kim đứng một mình
 const motion = { bg: null, prev: null, key: '', lastBusy: 0, lastMove: 0, hand: false, handSince: 0 };
 let poseNow  = null;       // tư thế kim của khung hiện tại (Geo.pose) hoặc null
 const vwatch = { t: -1, since: 0, seen: false, tried: false, busy: false };
@@ -98,7 +102,7 @@ const stuId = $('stu-id'), cvStatus = $('cv-status'), btnCam = $('btn-cam');
 const btnAuto = $('btn-auto'), btnSkin = $('btn-skin'), btnRegion = $('btn-region');
 const zoomEl = $('zoom'), zoomLbl = $('zoom-lbl');
 const tapHint = $('tap-hint'), noDetect = $('no-detect'), flashEl = $('flash');
-const liveEl = $('live'), lastEl = $('last'), statePill = $('state-pill');
+const liveEl = $('live'), lastEl = $('last'), statePill = $('state-pill'), lockEl = $('lock-pill');
 const btnPractice = $('btn-practice'), btnLast = $('btn-last');
 const camSelect = $('cam-select'), camInfo = $('cam-info');
 const tiltEl = $('tilt'), distEl = $('cam-dist'), fovEl = $('fov'), lenEl = $('needle-len');
@@ -161,7 +165,9 @@ function computePose() {
   const pt = track.dir ? Geo.pose(c, s, geo.dist, track.top, track.dir, needleLenCm) : null;
   const pv = tipValid() ? Geo.poseVisible(c, s, geo.dist, track.top, track.tip, needleLenCm) : null;
   if (pt) { pt.mode = 'top'; pt.topRaw = pt.raw; }
-  if (!pv) return pt;
+  // Còn tay trong khung: điểm cuối nhìn thấy thường là mép ngón tay che thân kim chứ không phải điểm đâm
+  // vào da → không dùng cách 'visible'.
+  if (!pv || motion.hand) return pt;
   pv.mode = 'visible'; pv.topRaw = pt ? pt.raw : null;
   // Dò thân kim chỉ có thể sai theo hướng dừng SỚM (bị che) → phần nhìn thấy ngắn giả → độ sâu lớn giả.
   // Vì vậy 'visible' nhỏ hơn thì tin; lớn hơn 'top' quá MODE_GAP thì tin 'top'.
@@ -280,6 +286,7 @@ function stopCamera() {
   live.ema = null; live.shown = null;
   vwatch.t = -1; vwatch.seen = false;
   resetAttempt();
+  forgetNeedle();
   statePill.style.display = 'none';
   setTapMode(null);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -355,7 +362,9 @@ function layoutView(vw, vh) {
 }
 
 /** Làm mượt kết quả thô và giữ kết quả cũ trong vài khung khi mất dấu. */
-function trackUpdate(raw) {
+function trackUpdate(raw, onRaw) {
+  if (onRaw) onRaw(raw);
+  autoLearn(raw);
   if (raw.found) {
     const top    = canvasToSrc(raw.top[0], raw.top[1]);
     const bottom = canvasToSrc(raw.bottom[0], raw.bottom[1]);
@@ -429,7 +438,9 @@ function frameStep() {
         hintLen: track.top && track.bottom ? Math.hypot(track.bottom[0] - track.top[0], track.bottom[1] - track.top[1]) * cs : 0,
         skin:   sk ? srcToCanvas(sk[0], sk[1]) : null,
         region: regionCanvas(),
-      }));
+        scale:  cs,
+        learn:  wantLearn,
+      }), lastRaw => { if (lastRaw.learned) wantLearn = false; showLock(); });
 
       drawRegion();
       drawSkin();
@@ -490,6 +501,33 @@ function updateLive(now, dt) {
   liveEl.style.display = 'block';
 }
 
+// ── Khoá nhận diện vào cây kim ────────────────────────────────────────────────
+/**
+ * Chưa khoá thì tự ghi nhớ cây kim khi thấy nó đứng một mình rõ ràng: không có tay, thấy trọn cây kim
+ * từ đỉnh cán tới điểm đâm sát đường mặt da, đường thẳng gọn, ổn định 10 khung liên tiếp.
+ * HIỆU CHUẨN cũng ghi nhớ lại (wantLearn).
+ */
+function autoLearn(raw) {
+  if (detector.locked || wantLearn) { learnRun = 0; return; }
+  const sk = skinSrc();
+  const good = raw.found && raw.tipOk && !motion.hand && sk && raw.quality && raw.quality.rms < 0.8;
+  if (!good) { learnRun = 0; return; }
+  const endSrc = canvasToSrc(raw.tip[0], raw.tip[1]);
+  const nearSkin = Math.abs(endSrc[1] - sk[1]) < 0.05 * video.videoHeight;
+  learnRun = nearSkin ? learnRun + 1 : 0;
+  if (learnRun >= 10) { wantLearn = true; learnRun = 0; }
+}
+function forgetNeedle() {
+  detector.forget(); wantLearn = false; learnRun = 0;
+  showLock();
+}
+/** Hiện trạng thái khoá: theo đầu kim sơn màu (chắc nhất) hoặc theo bề rộng cán + trục kim. */
+function showLock() {
+  const t = detector.colorLocked ? '🔒 Khoá theo đầu kim sơn màu' : detector.locked ? '🔒 Đã khoá kim' : '';
+  if (lockEl.textContent !== t) lockEl.textContent = t;
+  lockEl.style.display = t ? 'block' : 'none';
+}
+
 // ── Nhận biết bàn tay trong khung hình ────────────────────────────────────────
 /**
  * Tay được nhận biết là một MẢNG LỚN khác với ảnh nền (cảnh khi không có tay), không phải bằng chuyển động
@@ -500,7 +538,7 @@ function updateLive(now, dt) {
  *    nền cũ đã sai (dời tấm da, dời máy, nền lấy lúc tay còn trong khung) và lấy lại nền.
  * motion.lastBusy = lần cuối còn thấy tay.
  */
-const HAND_FRAC = 0.05, STALE_MS = 1200, HAND_MAX_MS = 15000;
+const HAND_FRAC = 0.05, STALE_MS = 4000, HAND_MAX_MS = 20000;
 function handStep(cur, now, key) {
   const m = motion, n = cur.length;
   if (!m.bg || m.key !== key || m.bg.length !== n) {       // khung nhìn đổi → lấy nền mới
@@ -550,84 +588,96 @@ function motionStep(now) {
   handStep(cur, now, [roi.x, roi.y, roi.w, gw, gh].map(Math.round).join(','));
 }
 
-// ── Một lần châm: thấy kim trong tay → "ting" → châm → bỏ tay ra → "tong" + kết quả ──
+// ── Một lần châm: "ting" → châm → buông tay → "tong" + kết quả ────────────────
 const PHASE_TEXT = {
-  idle:  'Đưa kim vào khung hình…',
-  armed: 'SẴN SÀNG — châm kim rồi buông tay',
-  done:  'ĐÃ CHỐT — rút kim để đo lần tiếp',
+  idle:   'Đặt mũi kim sát da, giữ yên…',
+  armed:  'SẴN SÀNG — châm kim',
+  moving: 'Đang châm — buông tay để chốt',
+  done:   'ĐÃ CHỐT — rút kim ra để đo lần tiếp',
 };
 function setPhase(p) {
   att.phase = p;
-  att.win = []; att.quiet = [];
+  att.win = []; att.buf = []; att.outSince = 0;
+  if (p === 'armed') att.hist = [];
   statePill.textContent = PHASE_TEXT[p];
-  statePill.className = 'pill' + (p === 'armed' ? ' ok' : p === 'done' ? ' info' : '');
+  statePill.className = 'pill' + (p === 'armed' ? ' ok' : p === 'moving' ? ' info' : '');
 }
 function resetAttempt() { setPhase('idle'); }
 
 /**
- * Tay cầm kim che mất cán/đỉnh kim nên số đo lúc còn tay không đáng tin. Vì vậy kết quả CHỈ lấy lúc tay đã
- * rời khung hình và kim đứng yên một mình trên da:
- *
- * idle  → có tay trong khung (khung hình đang chuyển động) và thấy kim ổn định READY_MS → "ting".
- * armed → chờ khung hình yên QUIET_MS (đã bỏ tay). Lúc đó kim đứng một mình: độ sâu = trung vị các mẫu
- *         trong lúc yên (kim không nhúc nhích nên lấy trung vị khử được nhiễu nhận diện) → "tong" + số.
- *         Yên lâu mà không có kim cắm (tay mang kim ra ngoài) → quay về idle.
- * done  → chờ tay quay lại (rút kim / châm lần nữa) rồi về idle.
+ * idle   → thấy kim ổn định READY_MS và mũi kim CHƯA vào da → "ting". (Kim đang cắm sẵn, đứng một mình,
+ *          không bao giờ được "ting" → không tự đo lặp lại khi không có ai châm.)
+ * armed  → chờ mũi kim qua mặt da.
+ * moving → đang châm. Chốt khi độ sâu đứng yên: QUIET_MS nếu đã bỏ tay, HOLD_LOCK_MS nếu tay vẫn giữ.
+ *          Lúc chốt ưu tiên các mẫu lấy khi không còn tay. Kim rút ra trước khi chốt → về armed.
+ * done   → giữ nguyên cho tới khi kim được rút ra (độ sâu ≈ 0 hoặc kim rời khung) → idle.
  */
 function attemptStep(now, fresh) {
   if (!geo.dist || !geo.skin) { statePill.style.display = 'none'; return; }
   statePill.style.display = 'block';
-  const ok    = fresh && !!poseNow;
-  const quiet = now - motion.lastBusy;                    // khung hình đã yên được bao lâu (ms)
+  const ok   = fresh && !!poseNow;
+  const hand = now - motion.lastBusy < 300;
+  if (ok) att.lastSeen = now;
+  const lost = now - att.lastSeen > LOST_MS;
+  const d    = ok ? poseNow.raw : null;
 
-  // Lịch sử vị trí điểm đang bám dọc theo kim (kể cả trước khi "ting": có thể châm ngay sau khi đưa kim vào).
-  // Chỉ ghi lúc còn chuyển động; dùng để tính tốc độ châm (xem Geo.descentSpeed).
-  if (ok && poseNow.topRaw != null && quiet < 250 && att.phase !== 'done') att.hist.push({ t: now, r: poseNow.topRaw });
+  // Lịch sử vị trí đỉnh cán dọc theo kim, dùng để tính tốc độ châm (xem Geo.descentSpeed).
+  if (ok && poseNow.topRaw != null && att.phase !== 'done') att.hist.push({ t: now, r: poseNow.topRaw });
   while (att.hist.length && now - att.hist[0].t > HIST_MS) att.hist.shift();
 
   if (att.phase === 'idle') {
-    att.win.push({ t: now, seen: fresh });
+    att.win.push({ t: now, ok, d, alone: ok && !hand && poseNow.mode === 'visible' });
     while (att.win.length > 1 && now - att.win[0].t > READY_MS) att.win.shift();
-    if (quiet > 300) { att.win = []; return; }            // không có tay → chưa có gì để báo
-    const seen = att.win.filter(s => s.seen).length;
-    if (now - att.win[0].t < READY_MS * 0.85 || seen < 5 || seen < 0.6 * att.win.length) return;
+    if (now - att.win[0].t < READY_MS * 0.85) return;
+    // Kim đứng một mình (không tay) thì chắc chắn đang cắm trên da: không có ai đang châm → không "ting".
+    // Nếu phần nhìn thấy dài hơn chiều dài kim đã cài thì chiều dài kim cài sai (đổi loại kim chưa đo lại).
+    const alone = att.win.filter(s => s.alone);
+    if (alone.length >= 0.8 * att.win.length && Geo.median(alone.map(s => s.d)) < -0.3 && now - att.warnAt > 8000) {
+      att.warnAt = now;
+      notify(`Kim nhìn thấy dài hơn chiều dài đã cài (${needleLenCm} cm).\nVào ⚙ bấm ĐO cạnh ô Kim dài để đo lại.`);
+    }
+    const good = att.win.filter(s => s.ok && !s.alone);
+    if (good.length < 5 || good.length < 0.6 * att.win.length) return;
+    if (Geo.median(good.map(s => s.d)) > READY_DEPTH) return;    // kim đang cắm sẵn trong da
     setPhase('armed');
     chime('ting');
     return;
   }
 
   if (att.phase === 'done') {
-    if (quiet < 100 && now - att.doneAt > 600) setPhase('idle');     // tay quay lại
+    if (lost) { setPhase('idle'); return; }
+    if (ok && d <= 0.08) {
+      if (!att.outSince) att.outSince = now;
+      if (now - att.outSince > 300) setPhase('idle');
+    } else if (ok) att.outSince = 0;
     return;
   }
 
-  // armed
-  if (quiet < 120) { att.quiet = []; return; }            // tay còn trong khung
-  if (ok) att.quiet.push({ raw: poseNow.raw, ang: poseNow.angle, vis: poseNow.mode === 'visible' });
-  if (quiet < QUIET_MS) return;
+  if (lost) { setPhase('idle'); return; }
+  if (!ok) return;
+  att.buf.push({ t: now, d, ang: poseNow.angle, hand, vis: poseNow.mode === 'visible' });
+  while (att.buf.length > 1 && now - att.buf[0].t > HOLD_LOCK_MS + 200) att.buf.shift();
 
-  const vis = att.quiet.filter(s => s.vis);
-  // Thấy cả cây kim (chắc chắn kim đang đứng một mình) thì chốt ngay; chỉ thấy cán kim thì chờ yên lâu hơn.
-  const use = vis.length >= 3 ? vis : quiet > GIVEUP_MS * 0.8 ? att.quiet : [];
-  if (use.length < 4) {
-    if (quiet > GIVEUP_MS) setPhase('idle');              // không còn kim trong khung
+  if (att.phase === 'armed') {
+    if (d > MIN_DEPTH) setPhase('moving');
     return;
   }
-  const raw = Geo.median(use.map(s => s.raw));
-  if (raw < MIN_DEPTH) {
-    // Kim đứng yên một mình tức là đang cắm trên da; nếu phần nhìn thấy còn dài hơn chiều dài kim đã cài
-    // thì chiều dài kim cài sai (đổi loại kim mà chưa đo lại).
-    if (vis.length >= 3 && raw < -0.3 && quiet > 900 && now - att.warnAt > 8000) {
-      att.warnAt = now;
-      notify(`Kim nhìn thấy dài hơn chiều dài đã cài (${needleLenCm} cm).\nVào ⚙ bấm ĐO cạnh ô Kim dài để đo lại.`);
-    }
-    if (quiet > GIVEUP_MS) setPhase('idle');
-    return;
-  }
+
+  // moving
+  if (d <= 0.05) { setPhase('armed'); return; }
+  const need = hand ? HOLD_LOCK_MS : QUIET_MS;
+  const win  = att.buf.filter(s => now - s.t <= need);
+  if (now - att.buf[0].t < need * 0.9 || win.length < 5) return;
+  let lo = Infinity, hi = -Infinity;
+  for (const s of win) { if (s.d < lo) lo = s.d; if (s.d > hi) hi = s.d; }
+  if (hi - lo > STEADY_CM) return;
+
+  const free = win.filter(s => !s.hand), vis = free.filter(s => s.vis);
+  const use  = vis.length >= 3 ? vis : free.length >= 3 ? free : win;
+  const raw  = Geo.median(use.map(s => s.d));
+  if (raw < MIN_DEPTH) return;
   const depth = Math.min(needleLenCm, raw);
   const sp = Geo.descentSpeed(att.hist, depth);
-  att.hist = [];
-  att.doneAt = now;
   setPhase('done');
   chime('tong');
   report({
@@ -750,7 +800,7 @@ function outOfView([x, y]) {
 }
 
 function updateView(r, vw, vh) {
-  if (!view.auto || att.phase === 'armed') return;    // đang châm → giữ nguyên khung (đổi khung làm hỏng việc dò chuyển động)
+  if (!view.auto || att.phase === 'armed' || att.phase === 'moving') return;   // đang châm → giữ nguyên khung
 
   if (view.mode === 'search') {      // chưa có khung: hiện toàn cảnh cho tới khi thấy kim
     if (!r.fresh) { view.hits = 0; return; }
@@ -892,7 +942,7 @@ canvas.addEventListener('click', e => {
     if (geo.dist) notify('Đã đổi điểm châm — hãy HIỆU CHUẨN lại (mũi kim chạm da tại chấm xanh).');
     setDist(null);
     if (view.auto) setAuto(true);          // căn lại khung theo điểm da mới
-  } else if (att.phase !== 'armed') {
+  } else if (att.phase !== 'armed' && att.phase !== 'moving') {
     view.cx = x / vw; view.cy = y / vh;    // chạm để dời tâm
     if (view.auto) setAuto(false);
     view.mode = 'track';
@@ -916,6 +966,7 @@ $('btn-calib').addEventListener('click', () => {
     store.set('skin', geo.skin);
   }
   setDist(c.dist);
+  detector.forget(); wantLearn = true;          // ghi nhớ (khoá) đúng cây kim đang dùng để hiệu chuẩn
   // Căn lại khung một lần theo tỉ lệ mới để thấy trọn kim cả khi nhấc lên.
   if (view.auto) frameOn(track.top, video.videoWidth, video.videoHeight);
   notify(`Đã hiệu chuẩn với kim ${needleLenCm} cm: camera cách điểm châm ${c.dist.toFixed(1)} cm (đo thước để đối chiếu).` +
