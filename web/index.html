@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Acupuncture Monitor</title>
-  <link rel="stylesheet" href="css/style.css?v=24">
+  <link rel="stylesheet" href="css/style.css?v=26">
 </head>
 <body>
 
@@ -37,6 +37,7 @@
     <div id="tap-hint" class="pill info" style="display:none"></div>
     <div id="state-pill" class="pill" style="display:none" role="status"></div>
     <div id="lock-pill" class="pill lock" style="display:none" title="Đã ghi nhớ cây kim — chỉ bám đúng cây kim này. Bấm HIỆU CHUẨN để ghi nhớ lại.">🔒 Đã khoá kim</div>
+    <div id="perf-pill" class="pill perf" style="display:none" title="Số khung hình máy này xử lý được mỗi giây và mức tương thích — chi tiết trong ⚙ Camera."></div>
   </div>
 
   <!-- ── Trái: số đo hiện tại ── -->
@@ -91,9 +92,8 @@
           <option value="fast">720p · 60 khung/s (đo châm nhanh tốt hơn)</option>
         </select>
       </div>
-      <div id="cam-info" class="set-note">—</div>
-      <div class="set-note">Tốc độ châm chính xác theo nhịp <b>app xử lý</b>. Ở 30 khung/s, cú châm nhanh nông (gọn trong
-        dưới 0,07 s) chỉ đo được mức tối thiểu (hiện “≥”). Đổi chế độ thì phải HIỆU CHUẨN lại.</div>
+      <div id="perf-short" class="set-note">Mức tương thích: đang đo khi bật camera…</div>
+      <div class="set-note">Đổi chế độ thì phải HIỆU CHUẨN lại.</div>
 
       <div class="set-title">Hình học</div>
       <div class="set-row">
@@ -106,6 +106,34 @@
         <input id="needle-len" class="set-input narrow" type="number" step="0.1" min="1" max="20" value="5.1">
         <button id="btn-len" class="chip">ĐO</button>
       </div>
+
+      <div class="set-title">Báo hiệu</div>
+      <label class="set-check"><input id="opt-sound" type="checkbox" checked> Âm báo: “ting” khi sẵn sàng đo, “tong” khi đã chốt</label>
+      <div class="set-row"><span class="set-label">Không nghe thấy? Tăng âm lượng rồi bấm</span><button id="btn-sound" class="chip">THỬ ÂM</button></div>
+      <label class="set-check"><input id="opt-flash" type="checkbox" checked> Hiện số lớn trên màn hình</label>
+      <label class="set-check"><input id="opt-voice" type="checkbox"> Đọc kết quả bằng giọng nói</label>
+
+      <div class="set-title">Nâng cao</div>
+      <div class="set-row"><span class="set-label">Nhịp xử lý, khoảng cách, góc nhìn… (để hiệu chỉnh, nghiên cứu)</span><button id="btn-tech" class="chip">CHI TIẾT KỸ THUẬT</button></div>
+    </div>
+  </div>
+
+  <!-- ── Chi tiết kỹ thuật (hiệu chỉnh, nghiên cứu) ── -->
+  <div id="tech-modal" class="modal" style="display:none">
+    <div class="modal-inner">
+      <div class="modal-top">
+        <span class="modal-title">Chi tiết kỹ thuật</span>
+        <button class="chip icon" data-close>✕</button>
+      </div>
+      <div class="set-title">Camera và nhịp xử lý</div>
+      <div id="tech-live" class="set-note tech-grid"></div>
+      <div id="cam-info" hidden></div>
+      <div id="perf-info" class="set-note"></div>
+      <div class="set-note">Tốc độ châm chính xác theo nhịp <b>app xử lý</b> của từng máy: cú châm diễn ra gọn trong
+        dưới 3 khung hình (ở 30 khung/s là dưới 0,1 s) chỉ đo được mức tối thiểu (hiện “≥”). Máy chậm sẽ tự thu nhỏ
+        ảnh xử lý để nhanh hơn. Đổi chế độ thì phải HIỆU CHUẨN lại.</div>
+
+      <div class="set-title">Hình học (hiệu chỉnh)</div>
       <div class="set-row">
         <span class="set-label">Camera → điểm châm (cm)</span>
         <input id="cam-dist" class="set-input narrow" type="number" step="0.1" min="3" max="300" placeholder="chưa có">
@@ -114,14 +142,8 @@
         <span class="set-label">Góc nhìn camera (độ)</span>
         <input id="fov" class="set-input narrow" type="number" step="1" min="30" max="130" value="63">
       </div>
-      <div class="set-note">Khoảng cách do HIỆU CHUẨN tính ra; đo bằng thước từ ống kính tới chấm xanh để đối chiếu.
+      <div class="set-note">Khoảng cách do HIỆU CHUẨN tính ra; đo bằng thước từ ống kính tới điểm châm để đối chiếu.
         Nếu lệch quá 10% thì chỉnh Góc nhìn camera (ống kính chính iPhone ≈ 63°) rồi hiệu chuẩn lại.</div>
-
-      <div class="set-title">Báo hiệu</div>
-      <label class="set-check"><input id="opt-sound" type="checkbox" checked> Âm báo: “ting” khi sẵn sàng đo, “tong” khi đã chốt</label>
-      <div class="set-row"><span class="set-label">Không nghe thấy? Tăng âm lượng rồi bấm</span><button id="btn-sound" class="chip">THỬ ÂM</button></div>
-      <label class="set-check"><input id="opt-flash" type="checkbox" checked> Hiện số lớn trên màn hình</label>
-      <label class="set-check"><input id="opt-voice" type="checkbox"> Đọc kết quả bằng giọng nói</label>
     </div>
   </div>
 
@@ -140,16 +162,16 @@
               Vật mảnh, thẳng, dựng đứng trong khung được coi là kim. Bấm lại để bỏ vùng.</li>
           <li>Trong ⚙ nhập <b>Kim dài</b> (đỉnh cán → mũi kim) của một cây kim đã biết chiều dài, và bấm <b>ĐO</b> góc nghiêng máy.</li>
           <li><b>HIỆU CHUẨN</b>: giữ cây kim đó thẳng đứng, mũi kim chạm mặt da, rồi bấm. Khi app thấy được mũi kim
-              (vòng xanh ngọc) thì tự đặt điểm châm tại đó; nếu không, bấm <b>MẶT DA</b> và chạm vào điểm mũi kim chạm da trước.</li>
+              thì tự đặt điểm châm tại đó; nếu không, bấm <b>MẶT DA</b> và chạm vào điểm mũi kim chạm da trước.</li>
           <li>Đổi sang loại kim khác: đặt mũi kim mới chạm mặt da, vào ⚙ bấm <b>ĐO</b> cạnh ô Kim dài — app tự đo
               chiều dài, không cần hiệu chuẩn lại.</li>
         </ol>
         <h4>Trên màn hình</h4>
         <ul>
-          <li>Chấm đỏ: đỉnh kim. Đường vàng: thân kim; vòng tròn vàng: mũi kim dự đoán.</li>
-          <li>Vòng xanh ngọc: điểm cuối nhìn thấy của kim (mũi kim, hoặc điểm kim đâm vào da). Khi có vòng này,
-              độ sâu = chiều dài kim − phần kim còn nhìn thấy, và không cần đâm trúng chấm xanh.</li>
-          <li>Chấm và đường xanh lá: điểm châm và mức mặt da. Khung xanh dương: vùng tìm kim.</li>
+          <li>Chấm đỏ: đỉnh kim app đang bám. Đường xanh lá đứt nét: mức mặt da.</li>
+          <li>Khung xanh dương (vùng tìm kim) chỉ hiện lúc đang khoanh VÙNG.</li>
+          <li>Nhãn cam/đỏ dưới thanh trạng thái: máy xử lý chậm, tốc độ châm nhanh chỉ đo được mức tối thiểu “≥”
+              (xem ⚙ → Mức tương thích).</li>
           <li>Bên trái: độ sâu, tốc độ, góc kim hiện tại. Bên phải: kết quả lần châm vừa chốt.</li>
           <li>Chạm vào hình để dời tâm; <b>TỰ CĂN</b> để app tự zoom vào kim.</li>
         </ul>
@@ -169,7 +191,7 @@
         <h4>Lưu ý</h4>
         <ul>
           <li>Làm lại HIỆU CHUẨN khi đổi khoảng cách, góc giá đỡ, điểm châm; đổi loại kim thì chỉ cần bấm ĐO cạnh ô Kim dài.</li>
-          <li>Một camera không thấy được chiều trước–sau: đâm lệch chấm xanh về phía gần/xa máy 1 cm, hoặc kim ngả
+          <li>Một camera không thấy được chiều trước–sau: đâm lệch điểm châm đã hiệu chuẩn về phía gần/xa máy 1 cm, hoặc kim ngả
               về phía máy 10°, làm độ sâu sai 3–4 mm khi máy nghiêng 60°. Dựng máy càng đứng (80–85°) và kê tấm da
               lên ngang tầm ống kính thì sai số này giảm còn khoảng 1 mm.</li>
           <li>Tốc độ = độ sâu chia cho thời gian kim thực sự đi xuống trong lần châm, tính từ chuyển động của cán kim
@@ -199,9 +221,9 @@
   <div id="toast" class="toast" style="display:none" role="status"></div>
 
   <!-- ── Scripts ── -->
-  <script src="js/geometry.js?v=24"></script>
-  <script src="js/needle_detector.js?v=24"></script>
-  <script src="js/app.js?v=24"></script>
+  <script src="js/geometry.js?v=26"></script>
+  <script src="js/needle_detector.js?v=26"></script>
+  <script src="js/app.js?v=26"></script>
   <!-- OpenCV tải sau app.js để hàm onOpenCvScriptLoaded luôn tồn tại khi onload chạy -->
   <script async
     src="js/opencv.js"

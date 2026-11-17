@@ -301,7 +301,7 @@ const Geo = (() => {
     if (!(dur > 0)) return null;
     // Lần châm gọn trong ≤ 2 khoảng giữa các khung: nội suy coi như kim đi đều giữa các khung nên thời gian
     // tính ra dài hơn thật → đây chỉ là mức tối thiểu.
-    return { speed: 0.8 * A / dur, dur, amount: A, noise: sig, floor: b - a <= 2 || dur < 2 * dtMed };
+    return { speed: 0.8 * A / dur, dur, amount: A, noise: sig, floor: b - a <= 2 || dur < 3 * dtMed };
   }
 
   return { camera, ray, project, calibrate, angleOnly, pose, poseVisible, aboveSkinPx, median, strokeSpeed, descentSpeed, riseSpeed };

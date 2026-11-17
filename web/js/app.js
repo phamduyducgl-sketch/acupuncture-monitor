@@ -46,6 +46,18 @@ const HOLD_LOCK_MS = 2000; // còn tay nhưng độ sâu đứng yên bao lâu t
 const STEADY_CM   = 0.12;  // dao động tối đa (cm) trong khoảng đó vẫn coi là đứng yên
 const LOST_MS     = 1500;  // mất dấu kim lâu hơn thế → coi như kim đã rời khung
 const CONFIRM_N   = 4;     // vị trí kim nhảy xa phải lặp lại bấy nhiêu khung liên tiếp mới được nhận
+// Máy yếu: tự thu nhỏ ảnh xử lý theo các mức này (chỉ giảm, không tăng lại trong một lần mở camera).
+const PROC_SCALES = [1, 0.8, 0.65, 0.5];
+const SLOW_FPS    = 18;    // app xử lý dưới mức này → thử thu nhỏ ảnh xử lý
+const MIN_NEEDLE_PX = 110; // nhưng cây kim trên ảnh xử lý không được ngắn hơn ngần này pixel (giữ độ chính xác độ sâu)
+// Mức tương thích theo nhịp app xử lý thật (khung/giây). vmax ≈ 0,27·fps: tốc độ lớn nhất đo được cho cú châm sâu 1 cm.
+const PERF_TIERS = [
+  { min: 40, name: 'Rất tốt',  cls: 'ok' },
+  { min: 24, name: 'Tốt',      cls: 'ok' },
+  { min: 15, name: 'Đạt',      cls: 'mid' },
+  { min: 10, name: 'Hạn chế',  cls: 'low' },
+  { min: 0,  name: 'Không phù hợp đo tốc độ', cls: 'bad' },
+];
 
 const detector       = new NeedleDetector();
 const searchDetector = new NeedleDetector();   // dò ngầm toàn khung khi mất dấu
@@ -308,7 +320,9 @@ function stopCamera() {
   setTapMode(null);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   proc.n = 0; proc.t0 = 0; proc.fps = 0; proc.wait = 0; proc.end = 0;
-  resetGrab();                                // luồng camera mới có thể nhanh/chậm khác → thử lại
+  lastFrameT = 0;
+  perfReset();
+  resetGrab();                               // luồng camera mới có thể nhanh/chậm khác → thử lại
   $('cam-placeholder').style.display = 'block';
   btnCam.classList.remove('on');
   noDetect.style.display = 'none';
@@ -378,6 +392,103 @@ function onSourceSize(vw, vh) {
 const proc = { n: 0, t0: 0, fps: 0, ms: [0, 0, 0], wait: 0, end: 0 };
 
 /**
+ * Mức tương thích của máy. Mỗi điện thoại (iPhone đời cũ, Android các hãng…) xử lý được số khung/giây khác nhau,
+ * và tốc độ châm chỉ đo được tới mức nhịp đó cho phép. Theo dõi khoảng cách thật giữa các khung đã xử lý:
+ *  - dt  = trung vị khoảng cách (ms) → các ngưỡng thời gian của quy trình ting/tong tự giãn theo máy;
+ *  - fps = 1000/dt → xếp mức tương thích, báo cho người dùng, ghi kèm vào từng kết quả;
+ *  - máy chậm (fps < SLOW_FPS) → tự thu nhỏ ảnh xử lý từng bậc, miễn cây kim trên ảnh còn đủ dài.
+ */
+const perf = { dts: [], dt: 33, fps: 0, si: 0, adjAt: 0, since: 0, tier: null, warned: false };
+function perfReset() { perf.dts = []; perf.dt = 33; perf.fps = 0; perf.si = 0; perf.adjAt = 0; perf.since = 0; perf.tier = null; perf.warned = false; showPerf(); }
+function perfFrame(dtMs, now) {
+  if (!perf.since) perf.since = now;
+  if (dtMs <= 0 || dtMs > 1500) return;                     // khung đầu tiên / tab bị ẩn
+  perf.dts.push(dtMs);
+  if (perf.dts.length > 90) perf.dts.shift();
+}
+const perfScale = () => PROC_SCALES[perf.si];
+/** Tốc độ lớn nhất (cm/s) đo được cho cú châm sâu A cm: quãng 10–90% phải trải qua ít nhất 3 khoảng khung (ít hơn thì kết quả thấp hơn thật, hiện “≥”). */
+const vMaxAt = A => 0.8 * A / (3 * perf.dt / 1000);
+function perfTick(now) {                                     // gọi mỗi giây
+  if (perf.dts.length < 10) return;
+  perf.dt  = Geo.median(perf.dts);
+  perf.fps = Math.round(1000 / perf.dt);
+  // Thu nhỏ ảnh xử lý: chỉ khi không đang châm, sau ≥3 s ở mức hiện tại.
+  if (perf.fps < SLOW_FPS && perf.si < PROC_SCALES.length - 1 && now - perf.adjAt > 3000 &&
+      (att.phase === 'idle' || att.phase === 'done') && grab.method) {
+    const next = PROC_SCALES[perf.si + 1] / PROC_SCALES[perf.si];
+    const lenPx = track.top && track.bottom
+      ? Math.hypot(track.bottom[0] - track.top[0], track.bottom[1] - track.top[1]) * canvas.width / roi.w : 0;
+    if (lenPx ? lenPx * next >= MIN_NEEDLE_PX : perf.si < 2) {
+      perf.si++; perf.adjAt = now; perf.dts = [];            // đo lại nhịp ở mức mới
+      return;
+    }
+  }
+  showPerf();
+  // Cảnh báo một lần khi đã ổn định (≥ 5 s) mà máy vẫn yếu.
+  if (!perf.warned && now - perf.since > 5000 && now - perf.adjAt > 3000 && perf.fps < 15) {
+    perf.warned = true;
+    notify(`Máy này chỉ xử lý được ${perf.fps} khung/giây — mức “${perf.tier.name}”.\n` +
+           `Độ sâu và góc vẫn đo được; tốc độ châm nhanh hơn ~${vMaxAt(1).toFixed(0)} cm/s (cú 1 cm) chỉ hiện mức tối thiểu “≥”.\n` +
+           `Xem gợi ý trong ⚙ (Camera).`);
+  }
+}
+function showPerf() {
+  const el = $('perf-pill'), info = $('perf-info'), short = $('perf-short');
+  if (!perf.fps) {
+    el.style.display = 'none'; info.textContent = '';
+    short.textContent = streaming ? 'Mức tương thích: đang đo…' : 'Mức tương thích: đo khi bật camera.';
+    return;
+  }
+  perf.tier = PERF_TIERS.find(t => perf.fps >= t.min);
+  el.textContent = `${perf.fps} khung/s · ${perf.tier.name}`;
+  el.className = 'pill perf ' + perf.tier.cls;
+  el.style.display = perf.tier.cls === 'ok' ? 'none' : 'block';   // trên màn hình đo chỉ hiện khi máy chậm
+  const tips = [];
+  if (perf.fps < 24) {
+    if (camMode === 'hd') tips.push('chọn Chế độ 720p · 60 khung/s');
+    tips.push('tắt Chế độ Nguồn điện thấp / Tiết kiệm pin, sạc pin', 'đóng các ứng dụng khác',
+              'bấm VÙNG khoanh hẹp quanh kim');
+  }
+  // Cho người dùng: chỉ mức tương thích, tốc độ đo được và gợi ý khi máy chậm.
+  short.innerHTML = `<b>Mức tương thích: ${perf.tier.name}</b> — đo tốc độ chính xác tới ≈ ${vMaxAt(1).toFixed(0)} cm/s ` +
+    `(cú châm sâu 1 cm); nhanh hơn hiện “≥”.` + (tips.length ? `<br>Gợi ý: ${tips.join('; ')}.` : '');
+  // Chi tiết kỹ thuật.
+  info.innerHTML = `Mức tương thích theo nhịp xử lý thật: ≥40 Rất tốt · ≥24 Tốt · ≥15 Đạt · ≥10 Hạn chế · dưới 10 Không phù hợp đo tốc độ. ` +
+    `Tốc độ tối đa đo chính xác ≈ 0,8·A / (3 khoảng khung): ${vMaxAt(0.5).toFixed(1)} cm/s (A = 0,5 cm), ` +
+    `${vMaxAt(1).toFixed(1)} cm/s (A = 1 cm), ${vMaxAt(2).toFixed(1)} cm/s (A = 2 cm).`;
+}
+const fmtMs = v => `${v.toFixed(0)} ms`;
+/** Bảng chi tiết kỹ thuật (popup), cập nhật mỗi giây khi camera chạy. */
+function showCamInfo() {
+  const rows = [];
+  let set = {};
+  try { set = video.srcObject.getVideoTracks()[0].getSettings(); } catch (_) {}
+  rows.push(['Ống kính', camInfo.dataset.label || '—']);
+  rows.push(['Độ phân giải', video.videoWidth ? `${video.videoWidth}×${video.videoHeight} (${camMode === 'fast' ? '720p' : '1080p'})` : '—']);
+  rows.push(['Camera báo', set.frameRate ? `${Math.round(set.frameRate)} khung/s` : '—']);
+  rows.push(['App xử lý', proc.fps ? `${proc.fps} khung/s (trung vị khoảng cách ${perf.dt.toFixed(0)} ms)` : '—']);
+  if (proc.fps) {
+    const st = proc.ms;
+    rows.push(['Đọc ảnh', fmtMs(st[0]) + (grab.method ? ` · cách ${grab.method.toUpperCase()} (thử: ${grab.cmp})` : ' · đang thử cách đọc')]);
+    rows.push(['Nhận diện kim', fmtMs(st[1])]);
+    rows.push(['Phần còn lại', fmtMs(st[2])]);
+    rows.push(['Chờ khung mới', fmtMs(proc.wait)]);
+  }
+  rows.push(['Ảnh xử lý', `${canvas.width}×${canvas.height} px · ${Math.round(perfScale() * 100)}%` + (perf.si ? ' (đã tự thu nhỏ vì máy chậm)' : '')]);
+  if (track.top && track.bottom && roi.w > 1) {
+    const L = Math.hypot(track.bottom[0] - track.top[0], track.bottom[1] - track.top[1]);
+    rows.push(['Kim trên ảnh', `${(L * canvas.width / roi.w).toFixed(0)} px xử lý · ${L.toFixed(0)} px gốc`]);
+  }
+  rows.push(['Khoá kim', detector.colorLocked ? 'theo đầu kim sơn màu' : detector.locked ? 'theo hình dạng cán' : 'chưa']);
+  rows.push(['Bàn tay', motion.hand ? 'có' : 'không']);
+  rows.push(['Hình học', `nghiêng ${geo.tiltDeg.toFixed(0)}° · lệch ngang ${geo.rollDeg.toFixed(0)}° · góc nhìn ${geo.fovDeg}° · ` +
+                         `kim ${needleLenCm} cm · camera→điểm châm ${geo.dist ? geo.dist.toFixed(1) + ' cm' : 'chưa hiệu chuẩn'}`]);
+  rows.push(['Lấy nét', focusInfo || '—']);
+  const esc = t => String(t).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  $('tech-live').innerHTML = rows.map(([k, v]) => `<b>${k}</b><span>${esc(v)}</span>`).join('');
+}
+/**
  * Lấy khung hình camera (vùng đang xem, thu về cỡ canvas) thành mảng điểm ảnh và hiện lên canvas.
  * Hai cách, tốc độ khác nhau tuỳ máy và tuỳ luồng camera (trên iPhone đo được 23–75 ms/khung với cách cũ):
  *  'cpu' — vẽ lên canvas phụ giữ ảnh trong bộ nhớ CPU rồi đọc; trình duyệt phải chuyển cả khung hình
@@ -418,26 +529,13 @@ function grabFrame() {
 function resetGrab() { grab.method = null; grab.trials = []; grab.cmp = ''; }
 /** Thời gian trung bình (làm mượt) của từng bước mỗi khung: đọc ảnh, nhận diện kim, phần còn lại. */
 function timeStages(...ms) { ms.forEach((v, i) => { proc.ms[i] += 0.1 * (v - proc.ms[i]); }); }
-function showCamInfo() {
-  let cfps = '', res = '';
-  try {
-    const st = video.srcObject.getVideoTracks()[0].getSettings();
-    if (st.frameRate) cfps = ` · camera ${Math.round(st.frameRate)} khung/s`;
-  } catch (_) {}
-  if (video.videoWidth) res = ` · ${video.videoWidth}×${video.videoHeight}`;
-  const st = proc.ms;
-  const how = grab.method ? `, cách ${grab.method.toUpperCase()} — thử: ${grab.cmp}` : ', đang thử cách đọc';
-  const p = proc.fps ? ` · app xử lý ${proc.fps} khung/s (mỗi khung: đọc ảnh ${st[0].toFixed(0)} ms${how}; ` +
-                       `nhận diện ${st[1].toFixed(0)} ms; còn lại ${st[2].toFixed(0)} ms; ` +
-                       `chờ khung mới ${proc.wait.toFixed(0)} ms)` : '';
-  camInfo.textContent = `${camInfo.dataset.label || 'camera'}${res}${cfps}${p} · lấy nét: ${focusInfo}`;
-}
 function countProcessed(now) {
   if (!proc.t0) proc.t0 = now;
   proc.n++;
   if (now - proc.t0 >= 1000) {
     proc.fps = Math.round(proc.n * 1000 / (now - proc.t0));
     proc.n = 0; proc.t0 = now;
+    perfTick(now);
     showCamInfo();
   }
 }
@@ -452,7 +550,7 @@ function layoutView(vw, vh) {
     y: clamp(view.cy * vh - h / 2, 0, vh - h),
     w, h,
   };
-  const long = view.mode === 'search' ? SEARCH_LONG : TRACK_LONG;
+  const long = (view.mode === 'search' ? SEARCH_LONG : TRACK_LONG) * perfScale();
   const s    = Math.min(1, long / Math.max(vw, vh));
   const cw   = Math.round(vw * s), ch = Math.round(vh * s);
   if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
@@ -535,6 +633,7 @@ function frameStep() {
       if (proc.end) proc.wait += 0.1 * (now - proc.end - proc.wait);   // thời gian chờ có khung mới từ camera
       countProcessed(now);
       const dt  = (now - lastFrameT) / 1000;
+      if (lastFrameT) perfFrame(now - lastFrameT, now);
       lastFrameT = now;
       if (vw !== srcW) onSourceSize(vw, vh);
       layoutView(vw, vh);
@@ -738,6 +837,9 @@ function attemptStep(now, fresh) {
   if (ok) att.lastSeen = now;
   const lost = now - att.lastSeen > LOST_MS;
   const d    = ok ? poseNow.raw : null;
+  // Số mẫu cần có trong một khoảng thời gian, theo nhịp khung thật của máy (máy chậm 8 khung/s chỉ có
+  // ~4 khung trong 0,5 s — nếu đòi cố định 5 mẫu thì sẽ không bao giờ "ting"/"tong").
+  const nIn  = ms => Math.max(3, Math.min(5, Math.floor(0.6 * ms / perf.dt)));
 
   // Lịch sử vị trí đỉnh cán dọc theo kim, dùng để tính tốc độ châm (xem Geo.descentSpeed).
   if (ok && poseNow.topRaw != null && att.phase !== 'done') att.hist.push({ t: now, r: poseNow.topRaw });
@@ -755,7 +857,7 @@ function attemptStep(now, fresh) {
       notify(`Kim nhìn thấy dài hơn chiều dài đã cài (${needleLenCm} cm).\nVào ⚙ bấm ĐO cạnh ô Kim dài để đo lại.`);
     }
     const good = att.win.filter(s => s.ok && !s.alone);
-    if (good.length < 5 || good.length < 0.6 * att.win.length) return;
+    if (good.length < nIn(READY_MS) || good.length < 0.6 * att.win.length) return;
     if (Geo.median(good.map(s => s.d)) > READY_DEPTH) return;    // kim đang cắm sẵn trong da
     setPhase('armed');
     chime('ting');
@@ -783,9 +885,9 @@ function attemptStep(now, fresh) {
 
   // moving
   if (d <= 0.05) { setPhase('armed'); return; }
-  const need = hand ? HOLD_LOCK_MS : QUIET_MS;
+  const need = Math.max(hand ? HOLD_LOCK_MS : QUIET_MS, 3.5 * perf.dt);   // máy chậm: đủ ≥ 3 khung
   const win  = att.buf.filter(s => now - s.t <= need);
-  if (now - att.buf[0].t < need * 0.9 || win.length < 5) return;
+  if (now - att.buf[0].t < need * 0.9 || win.length < nIn(need)) return;
   let lo = Infinity, hi = -Infinity;
   for (const s of win) { if (s.d < lo) lo = s.d; if (s.d > hi) hi = s.d; }
   if (hi - lo > STEADY_CM) return;
@@ -795,7 +897,7 @@ function attemptStep(now, fresh) {
   const raw  = Geo.median(use.map(s => s.d));
   if (raw < MIN_DEPTH) return;
   const depth = Math.min(needleLenCm, raw);
-  const sp = Geo.riseSpeed(att.hist, depth);
+  const sp = Geo.riseSpeed(att.hist, depth, Math.max(400, 4 * perf.dt));
   setPhase('done');
   chime('tong');
   report({
@@ -803,6 +905,7 @@ function attemptStep(now, fresh) {
     speed: sp ? Math.round(sp.speed * 10) / 10 : null,   // null = không bám được chuyển động của kim lúc đâm
     sf:    sp && sp.floor ? 1 : 0,                       // 1 = châm nhanh hơn khả năng đo (giá trị là mức tối thiểu)
     angle: Math.round(Geo.median(use.map(s => s.ang))),
+    fps:   perf.fps || null,                             // nhịp xử lý của máy lúc đo (để so kết quả giữa các máy)
   });
 }
 
@@ -936,7 +1039,7 @@ function updateView(r, vw, vh) {
 }
 
 function backgroundSearch(vw, vh) {
-  const s = Math.min(1, SEARCH_LONG / Math.max(vw, vh));
+  const s = Math.min(1, SEARCH_LONG * perfScale() / Math.max(vw, vh));
   const w = Math.round(vw * s), h = Math.round(vh * s);
   if (offCanvas.width !== w || offCanvas.height !== h) { offCanvas.width = w; offCanvas.height = h; }
   offCtx.drawImage(video, 0, 0, w, h);
@@ -1188,7 +1291,8 @@ function drawRegion() {
   } else {
     r = regionCanvas();
   }
-  if (!r) return;
+  // Khung vùng tìm kim chỉ hiện khi đang khoanh vùng; lúc đo màn hình chỉ có mức da và chấm đỏ.
+  if (!r || (!liveDrag && tapMode !== 'region')) return;
   ctx.save();
   ctx.strokeStyle = liveDrag ? '#ffd33d' : '#58a6ff';
   ctx.lineWidth = liveDrag ? 2 : 1.5;
@@ -1197,7 +1301,7 @@ function drawRegion() {
   ctx.restore();
 }
 
-/** Đường mặt da và điểm châm đã đặt. */
+/** Đường mức da. */
 function drawSkin() {
   const s = skinSrc();
   if (!s) return;
@@ -1208,32 +1312,12 @@ function drawSkin() {
   ctx.lineWidth = 1.5;
   ctx.setLineDash([8, 6]);
   ctx.beginPath(); ctx.moveTo(0, v); ctx.lineTo(canvas.width, v); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.beginPath(); ctx.arc(u, v, 5, 0, Math.PI * 2); ctx.stroke();
   ctx.restore();
 }
 
-/** Đỉnh kim (chấm đỏ), thân kim (đường vàng) và mũi kim dự đoán (vòng tròn vàng). */
+/** Chỉ vẽ đỉnh kim (chấm đỏ) — thân kim và mũi kim không vẽ để màn hình gọn. */
 function drawNeedle() {
   const [tx, ty] = srcToCanvas(track.top[0], track.top[1]);
-  const tip = poseNow ? poseNow.tipPx : null;
-  const end = tip || track.bottom;       // chưa hiệu chuẩn → chỉ vẽ phần nhìn thấy
-  if (end) {
-    const [ex, ey] = srcToCanvas(end[0], end[1]);
-    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(ex, ey);
-    ctx.strokeStyle = '#ffd33d'; ctx.lineWidth = 2; ctx.stroke();
-    if (tip) {
-      ctx.beginPath(); ctx.arc(ex, ey, 6, 0, Math.PI * 2);
-      ctx.strokeStyle = '#ffd33d'; ctx.lineWidth = 2; ctx.stroke();
-      ctx.beginPath(); ctx.arc(ex, ey, 1.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffd33d'; ctx.fill();
-    }
-  }
-  if (tipValid()) {                        // điểm cuối nhìn thấy của kim (xanh ngọc): mũi kim / điểm đâm vào da
-    const [vx, vy] = srcToCanvas(track.tip[0], track.tip[1]);
-    ctx.beginPath(); ctx.arc(vx, vy, 4, 0, Math.PI * 2);
-    ctx.strokeStyle = '#39d0d8'; ctx.lineWidth = 2; ctx.stroke();
-  }
   ctx.beginPath();
   ctx.arc(tx, ty, 5, 0, Math.PI * 2);
   ctx.fillStyle = '#ff4444';
@@ -1394,8 +1478,8 @@ function buildCSV() {
   const rows = [
     ['MSSV', session.id], ['Bắt đầu', fmtTime(session.start)],
     ['Kết thúc', session.end ? fmtTime(session.end) : ''], [],
-    ['Lần', 'Thời điểm', 'Độ sâu (cm)', 'Tốc độ (cm/s)', 'Góc kim (độ)', 'Ghi chú'],
-    ...session.records.map(r => [r.n, fmtTime(r.t), r.depth, r.speed ?? '', r.angle,
+    ['Lần', 'Thời điểm', 'Độ sâu (cm)', 'Tốc độ (cm/s)', 'Góc kim (độ)', 'Khung/s', 'Ghi chú'],
+    ...session.records.map(r => [r.n, fmtTime(r.t), r.depth, r.speed ?? '', r.angle, r.fps ?? '',
                                  r.sf ? 'Tốc độ là mức tối thiểu (châm nhanh hơn khả năng đo)' : '']),
   ];
   const esc = v => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
@@ -1457,6 +1541,7 @@ $('btn-share').addEventListener('click', async () => {
 // ── Bảng nổi ──────────────────────────────────────────────────────────────────
 $('btn-settings').addEventListener('click', () => { $('settings-modal').style.display = 'flex'; });
 $('btn-help').addEventListener('click', () => { $('help-modal').style.display = 'flex'; });
+$('btn-tech').addEventListener('click', () => { showCamInfo(); showPerf(); $('tech-modal').style.display = 'flex'; });
 document.querySelectorAll('.modal').forEach(m => {
   m.addEventListener('click', e => {
     if (e.target === m || e.target.closest('[data-close]')) m.style.display = 'none';
