@@ -76,6 +76,7 @@ let lastFrameT  = 0;
 let lastVideoT  = -1;   // thời điểm (giây) của khung hình camera đã xử lý gần nhất
 let srcW        = 0;
 let focusInfo   = '';
+let torchInfo   = '';
 let tapMode     = null;    // null | 'skin' | 'region'
 let drag        = null;    // khung đang kéo khi khoanh vùng
 let suppressClick = false;
@@ -270,6 +271,16 @@ async function attachStream(stream) {
       focusInfo = 'tự động liên tục';
     }
   } catch (_) {}
+  // Bật đèn flash (torch) để đủ sáng cho việc nhận diện kim.
+  // Chỉ camera sau mới có đèn; trình duyệt không hỗ trợ thì bỏ qua.
+  torchInfo = 'không hỗ trợ trên trình duyệt/camera này';
+  try {
+    const caps = trk.getCapabilities ? trk.getCapabilities() : {};
+    if (caps.torch) {
+      await trk.applyConstraints({ advanced: [{ torch: true }] });
+      torchInfo = 'đang bật';
+    }
+  } catch (_) { torchInfo = 'không bật được'; }
   const opt = [...camSelect.options].find(o => o.textContent === trk.label);
   camSelect.value = opt && store.get('camLabel', '') ? opt.value : '';
   camInfo.dataset.label = trk.label || 'camera';
@@ -485,6 +496,7 @@ function showCamInfo() {
   rows.push(['Hình học', `nghiêng ${geo.tiltDeg.toFixed(0)}° · lệch ngang ${geo.rollDeg.toFixed(0)}° · góc nhìn ${geo.fovDeg}° · ` +
                          `kim ${needleLenCm} cm · camera→điểm châm ${geo.dist ? geo.dist.toFixed(1) + ' cm' : 'chưa hiệu chuẩn'}`]);
   rows.push(['Lấy nét', focusInfo || '—']);
+  rows.push(['Đèn flash', torchInfo || '—']);
   const esc = t => String(t).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   $('tech-live').innerHTML = rows.map(([k, v]) => `<b>${k}</b><span>${esc(v)}</span>`).join('');
 }
