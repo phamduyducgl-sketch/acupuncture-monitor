@@ -115,7 +115,23 @@ button, input, select { font-family: inherit; }
 .pill.lock { background: rgba(48,54,61,0.85); font-size: 12px; padding: 3px 10px; margin-top: 4px; }
 .pill.ok   { background: rgba(26,127,55,0.95); font-weight: 700; }
 .pill.warn { background: rgba(218,54,51,0.88); }
-.pill.perf { font-size: 11px; padding: 2px 10px; margin-top: 4px; font-weight: 600; }
+.pill.perf { font-size: 11px; padding: 2px 10px; margin-top: 4px; font-weight: 600;
+             pointer-events: auto; cursor: pointer; border: 0; color: #fff; font-family: inherit;
+             -webkit-tap-highlight-color: transparent; }
+#btn-torch:not(.on) { filter: grayscale(1); opacity: 0.6; }
+#btn-torch.off { opacity: 0.3; }
+
+/* ── Chẩn đoán tốc độ đo ── */
+.diag-status { padding: 8px 10px; border-radius: 8px; margin: 2px 0 8px; color: #fff; }
+.diag-status.ok  { background: rgba(26,127,55,0.95); }
+.diag-status.mid { background: rgba(154,103,0,0.95); }
+.diag-status.low { background: rgba(188,76,0,0.95); }
+.diag-status.bad { background: rgba(218,54,51,0.95); }
+.diag-status.wait { background: var(--sheet-input); color: var(--sheet-text); }
+.diag-bars { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 8px; align-items: center; font-size: 0.78rem; margin: 6px 0; }
+.diag-bar { height: 8px; border-radius: 4px; background: var(--accent); min-width: 2px; }
+.diag-bar.wait { background: #e3b341; }
+.help .diag-act { margin: 4px 0 2px; height: 32px; }
 .pill.perf.ok  { background: rgba(48,54,61,0.75); }
 .pill.perf.mid { background: rgba(154,103,0,0.9); }
 .pill.perf.low { background: rgba(188,76,0,0.92); }

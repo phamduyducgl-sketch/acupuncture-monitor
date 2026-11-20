@@ -41,7 +41,11 @@ Camera điện thoại quay cây kim khi sinh viên châm vào mô hình da; app
 ## Những điều đã biết
 - Nhiều iPhone chỉ cho 60 khung/giây ở 720p → có chế độ `fast` (720p/60) và `hd` (1080p).
 - App tự giảm độ phân giải xử lý trên máy yếu (`PROC_SCALES`).
-- Bật đèn flash dùng thuộc tính `torch`; **iOS Safari có thể không hỗ trợ** — khi đó popup ghi
-  "không hỗ trợ" và nên dùng đèn LED/đèn bàn chiếu vùng kim.
+- Đèn flash (`torch`) **bật được trên iPhone của chủ dự án** (Safari, 11/2026). Nút 🔦 cạnh nút camera
+  bật/tắt, lựa chọn được nhớ. Máy không hỗ trợ thì nút mờ đi và nhắc dùng đèn bàn/LED.
+- **Thiếu sáng làm camera gửi ít hình** (iPhone kéo dài thời gian chụp): "Chờ khung mới" tăng vọt dù app xử lý
+  nhanh — ví dụ còn 2 khung/s. Không phải lỗi code. Mục "Chẩn đoán tốc độ đo" (bấm nhãn tốc độ, hoặc ⚙ → CHẨN ĐOÁN)
+  so thời gian xử lý với thời gian chờ để chỉ ra nguyên nhân và hướng dẫn khắc phục.
+- Mỗi lần sửa file trong `web/` phải tăng số `?v=` trong `index.html`, nếu không iPhone vẫn dùng bản cũ đã lưu tạm.
 - Đo độ sâu dựa trên 2 giả định (ghi ở đầu `geometry.js`): kim nằm trong mặt phẳng chính diện
   với camera, và khoảng cách camera → điểm châm lấy từ hiệu chuẩn.

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Acupuncture Monitor</title>
-  <link rel="stylesheet" href="css/style.css?v=27">
+  <link rel="stylesheet" href="css/style.css?v=28">
 </head>
 <body>
 
@@ -25,6 +25,7 @@
              autocomplete="off" autocorrect="off" autocapitalize="off">
       <span id="cv-status" class="dot warn" title="OpenCV đang tải"></span>
       <button id="btn-cam" class="chip icon" aria-label="Bật/tắt camera">📷</button>
+      <button id="btn-torch" class="chip icon" aria-label="Bật/tắt đèn flash">🔦</button>
       <button id="btn-help" class="chip icon" aria-label="Hướng dẫn">?</button>
       <button id="btn-settings" class="chip icon" aria-label="Cài đặt">⚙</button>
     </div>
@@ -37,7 +38,7 @@
     <div id="tap-hint" class="pill info" style="display:none"></div>
     <div id="state-pill" class="pill" style="display:none" role="status"></div>
     <div id="lock-pill" class="pill lock" style="display:none" title="Đã ghi nhớ cây kim — chỉ bám đúng cây kim này. Bấm HIỆU CHUẨN để ghi nhớ lại.">🔒 Đã khoá kim</div>
-    <div id="perf-pill" class="pill perf" style="display:none" title="Số khung hình máy này xử lý được mỗi giây và mức tương thích — chi tiết trong ⚙ Camera."></div>
+    <button id="perf-pill" class="pill perf" style="display:none" title="Số khung hình máy này xử lý được mỗi giây — bấm để xem nguyên nhân và cách khắc phục."></button>
   </div>
 
   <!-- ── Trái: số đo hiện tại ── -->
@@ -93,6 +94,7 @@
         </select>
       </div>
       <div id="perf-short" class="set-note">Mức tương thích: đang đo khi bật camera…</div>
+      <div class="set-row"><span class="set-label">Máy đo chậm? Xem nguyên nhân và cách khắc phục</span><button id="btn-diag" class="chip">CHẨN ĐOÁN</button></div>
       <div class="set-note">Đổi chế độ thì phải HIỆU CHUẨN lại.</div>
 
       <div class="set-title">Hình học</div>
@@ -147,6 +149,17 @@
     </div>
   </div>
 
+  <!-- ── Chẩn đoán khi máy đo chậm ── -->
+  <div id="diag-modal" class="modal" style="display:none">
+    <div class="modal-inner">
+      <div class="modal-top">
+        <span class="modal-title">Chẩn đoán tốc độ đo</span>
+        <button class="chip icon" data-close>✕</button>
+      </div>
+      <div id="diag-body" class="help"></div>
+    </div>
+  </div>
+
   <!-- ── Hướng dẫn ── -->
   <div id="help-modal" class="modal" style="display:none">
     <div class="modal-inner">
@@ -170,8 +183,10 @@
         <ul>
           <li>Chấm đỏ: đỉnh kim app đang bám. Đường xanh lá đứt nét: mức mặt da.</li>
           <li>Khung xanh dương (vùng tìm kim) chỉ hiện lúc đang khoanh VÙNG.</li>
-          <li>Nhãn cam/đỏ dưới thanh trạng thái: máy xử lý chậm, tốc độ châm nhanh chỉ đo được mức tối thiểu “≥”
-              (xem ⚙ → Mức tương thích).</li>
+          <li>🔦 cạnh nút camera: bật/tắt đèn flash. Nên bật khi phòng tối — thiếu sáng làm nhận diện kim kém
+              và làm camera gửi ít hình hơn.</li>
+          <li>Nhãn cam/đỏ dưới thanh trạng thái: máy đo chậm, tốc độ châm nhanh chỉ đo được mức tối thiểu “≥”.
+              <b>Bấm vào nhãn</b> để xem nguyên nhân và từng bước khắc phục.</li>
           <li>Bên trái: độ sâu, tốc độ, góc kim hiện tại. Bên phải: kết quả lần châm vừa chốt.</li>
           <li>Chạm vào hình để dời tâm; <b>TỰ CĂN</b> để app tự zoom vào kim.</li>
         </ul>
@@ -221,9 +236,9 @@
   <div id="toast" class="toast" style="display:none" role="status"></div>
 
   <!-- ── Scripts ── -->
-  <script src="js/geometry.js?v=27"></script>
-  <script src="js/needle_detector.js?v=27"></script>
-  <script src="js/app.js?v=27"></script>
+  <script src="js/geometry.js?v=28"></script>
+  <script src="js/needle_detector.js?v=28"></script>
+  <script src="js/app.js?v=28"></script>
   <!-- OpenCV tải sau app.js để hàm onOpenCvScriptLoaded luôn tồn tại khi onload chạy -->
   <script async
     src="js/opencv.js"

@@ -271,16 +271,7 @@ async function attachStream(stream) {
       focusInfo = 'tự động liên tục';
     }
   } catch (_) {}
-  // Bật đèn flash (torch) để đủ sáng cho việc nhận diện kim.
-  // Chỉ camera sau mới có đèn; trình duyệt không hỗ trợ thì bỏ qua.
-  torchInfo = 'không hỗ trợ trên trình duyệt/camera này';
-  try {
-    const caps = trk.getCapabilities ? trk.getCapabilities() : {};
-    if (caps.torch) {
-      await trk.applyConstraints({ advanced: [{ torch: true }] });
-      torchInfo = 'đang bật';
-    }
-  } catch (_) { torchInfo = 'không bật được'; }
+  await applyTorch();
   const opt = [...camSelect.options].find(o => o.textContent === trk.label);
   camSelect.value = opt && store.get('camLabel', '') ? opt.value : '';
   camInfo.dataset.label = trk.label || 'camera';
@@ -322,6 +313,8 @@ function stopCamera() {
   const stream = video.srcObject;
   if (stream) stream.getTracks().forEach(t => t.stop());
   video.srcObject = null;
+  torchCap = false; torchInfo = '';
+  showTorch();
   track.top = null;
   live.ema = null; live.shown = null;
   vwatch.t = -1; vwatch.seen = false;
@@ -341,6 +334,47 @@ function stopCamera() {
 }
 
 btnCam.addEventListener('click', () => { if (streaming) stopCamera(); else startCamera(); });
+
+// ── Đèn flash ─────────────────────────────────────────────────────────────────
+// Đủ sáng giúp nhận diện kim, và khi thiếu sáng iPhone kéo dài thời gian chụp mỗi hình nên gửi ít hình hơn.
+// Người dùng chọn bật/tắt bằng nút 🔦; lựa chọn được nhớ cho lần sau. Chỉ camera sau có đèn.
+let torchOn  = store.get('torch', true);
+let torchCap = false;                        // camera đang mở có đèn điều khiển được không
+const btnTorch = $('btn-torch');
+function showTorch() {
+  const live = !!video.srcObject;
+  btnTorch.classList.toggle('on', torchOn && (!live || torchCap));
+  btnTorch.classList.toggle('off', live && !torchCap);
+  btnTorch.setAttribute('aria-pressed', String(torchOn));
+  btnTorch.title = live && !torchCap ? 'Máy/trình duyệt này không cho bật đèn flash'
+                                     : torchOn ? 'Đèn flash: BẬT (bấm để tắt)' : 'Đèn flash: TẮT (bấm để bật)';
+}
+async function applyTorch() {
+  const trk = video.srcObject && video.srcObject.getVideoTracks()[0];
+  torchCap  = false;
+  torchInfo = 'không hỗ trợ trên trình duyệt/camera này';
+  try {
+    const caps = trk && trk.getCapabilities ? trk.getCapabilities() : {};
+    if (caps.torch) {
+      torchCap = true;
+      await trk.applyConstraints({ advanced: [{ torch: torchOn }] });
+      torchInfo = torchOn ? 'đang bật' : 'đang tắt (người dùng chọn)';
+    }
+  } catch (_) { torchInfo = 'không bật được'; }
+  showTorch();
+}
+async function toggleTorch() {
+  if (video.srcObject && !torchCap) {
+    notify('Máy/trình duyệt này không cho bật đèn flash.\nHãy dùng đèn bàn hoặc đèn LED chiếu vào vùng kim.');
+    return;
+  }
+  torchOn = !torchOn;
+  store.set('torch', torchOn);
+  if (video.srcObject) await applyTorch();
+  else { showTorch(); notify(torchOn ? 'Đèn flash sẽ bật khi mở camera.' : 'Đèn flash sẽ tắt khi mở camera.'); }
+  if (diagModal.style.display === 'flex') showDiag();
+}
+btnTorch.addEventListener('click', toggleTorch);
 $('cam-placeholder').addEventListener('click', () => startCamera());
 
 $('cam-mode').addEventListener('change', async e => {
@@ -441,7 +475,7 @@ function perfTick(now) {                                     // gọi mỗi giâ
     perf.warned = true;
     notify(`Máy này chỉ xử lý được ${perf.fps} khung/giây — mức “${perf.tier.name}”.\n` +
            `Độ sâu và góc vẫn đo được; tốc độ châm nhanh hơn ~${vMaxAt(1).toFixed(0)} cm/s (cú 1 cm) chỉ hiện mức tối thiểu “≥”.\n` +
-           `Xem gợi ý trong ⚙ (Camera).`);
+           `Bấm vào nhãn màu ở trên để xem nguyên nhân và cách khắc phục.`);
   }
 }
 function showPerf() {
@@ -452,23 +486,95 @@ function showPerf() {
     return;
   }
   perf.tier = PERF_TIERS.find(t => perf.fps >= t.min);
-  el.textContent = `${perf.fps} khung/s · ${perf.tier.name}`;
+  el.textContent = `${perf.fps} khung/s · ${perf.tier.name} · Cách khắc phục ›`;
   el.className = 'pill perf ' + perf.tier.cls;
   el.style.display = perf.tier.cls === 'ok' ? 'none' : 'block';   // trên màn hình đo chỉ hiện khi máy chậm
-  const tips = [];
-  if (perf.fps < 24) {
-    if (camMode === 'hd') tips.push('chọn Chế độ 720p · 60 khung/s');
-    tips.push('tắt Chế độ Nguồn điện thấp / Tiết kiệm pin, sạc pin', 'đóng các ứng dụng khác',
-              'bấm VÙNG khoanh hẹp quanh kim');
-  }
-  // Cho người dùng: chỉ mức tương thích, tốc độ đo được và gợi ý khi máy chậm.
+  // Cho người dùng: chỉ mức tương thích, tốc độ đo được; khi máy chậm thì chỉ tới mục CHẨN ĐOÁN.
   short.innerHTML = `<b>Mức tương thích: ${perf.tier.name}</b> — đo tốc độ chính xác tới ≈ ${vMaxAt(1).toFixed(0)} cm/s ` +
-    `(cú châm sâu 1 cm); nhanh hơn hiện “≥”.` + (tips.length ? `<br>Gợi ý: ${tips.join('; ')}.` : '');
+    `(cú châm sâu 1 cm); nhanh hơn hiện “≥”.` + (perf.fps < 24 ? '<br>Bấm <b>CHẨN ĐOÁN</b> để xem nguyên nhân và cách khắc phục.' : '');
   // Chi tiết kỹ thuật.
   info.innerHTML = `Mức tương thích theo nhịp xử lý thật: ≥40 Rất tốt · ≥24 Tốt · ≥15 Đạt · ≥10 Hạn chế · dưới 10 Không phù hợp đo tốc độ. ` +
     `Tốc độ tối đa đo chính xác ≈ 0,8·A / (3 khoảng khung): ${vMaxAt(0.5).toFixed(1)} cm/s (A = 0,5 cm), ` +
     `${vMaxAt(1).toFixed(1)} cm/s (A = 1 cm), ${vMaxAt(2).toFixed(1)} cm/s (A = 2 cm).`;
 }
+/**
+ * Chẩn đoán vì sao máy đo chậm, dành cho người dùng không chuyên.
+ * Mỗi khung hình gồm 2 phần thời gian:
+ *  - app xử lý (đọc ảnh + nhận diện kim + phần còn lại): lớn → máy xử lý chậm;
+ *  - chờ camera gửi hình mới: lớn → camera gửi ít hình, thường do THIẾU SÁNG (iPhone kéo dài thời gian chụp
+ *    mỗi hình), Chế độ nguồn điện thấp, hoặc máy nóng.
+ * Phần nào lớn hơn là nguyên nhân chính; các bước khắc phục xếp theo thứ tự nên thử. Bảng tự cập nhật mỗi giây.
+ */
+const diagModal = $('diag-modal'), diagBody = $('diag-body');
+function diagHtml() {
+  if (!streaming) return '<p>Bấm 📷 bật camera, hướng vào kim rồi mở lại mục này. App cần đo vài giây để chẩn đoán.</p>';
+  const fps = perf.fps || proc.fps;
+  if (!fps || !proc.end) return '<p class="diag-status wait">Đang đo… giữ camera chạy vài giây.</p>';
+  const tier = PERF_TIERS.find(t => fps >= t.min);
+  let set = {};
+  try { set = video.srcObject.getVideoTracks()[0].getSettings(); } catch (_) {}
+  const camFps = Math.round(set.frameRate || 30);
+  const work = proc.ms[0] + proc.ms[1] + proc.ms[2];
+  const wait = Math.max(0, proc.wait);
+  const total = Math.max(1, work + wait);
+  const bar = (label, ms, cls) =>
+    `<span>${label}</span><div class="diag-bar ${cls}" style="width:${(100 * ms / total).toFixed(0)}%"></div><b>${ms.toFixed(0)} ms</b>`;
+
+  let h = `<p class="diag-status ${tier.cls}">Hiện tại: <b>${fps} khung/giây — ${tier.name}</b><br>` +
+          `Cần ít nhất 15 (Đạt), tốt nhất từ 24 trở lên.</p>`;
+  if (fps >= 24) {
+    return h + '<p>✓ Máy đang đo tốt, không cần chỉnh gì thêm. Giữ nguyên ánh sáng và vị trí máy như hiện tại.</p>';
+  }
+  h += `<h4>Mỗi hình mất bao lâu</h4><div class="diag-bars">` +
+       bar('App xử lý', work, '') + bar('Chờ camera gửi hình', wait, 'wait') + `</div>`;
+
+  const steps = [];
+  const torchStep = !torchCap
+    ? '<b>Chiếu sáng thêm:</b> máy/trình duyệt này không bật được đèn flash — dùng đèn bàn hoặc đèn LED chiếu vào vùng kim.'
+    : torchOn
+      ? '<b>Chiếu sáng thêm:</b> đèn flash đang bật; nếu vẫn chậm, thêm đèn bàn hoặc đèn LED chiếu vào vùng kim.'
+      : '<b>Bật đèn flash</b> (nút 🔦 cạnh nút camera) hoặc dùng đèn bàn chiếu vào vùng kim.' +
+        '<br><button class="chip on diag-act" data-act="torch">🔦 BẬT ĐÈN NGAY</button>';
+  const lowPower = '<b>Tắt Chế độ nguồn điện thấp:</b> Cài đặt → Pin → tắt (biểu tượng pin màu vàng). ' +
+                   'Chế độ này làm chậm cả camera lẫn bộ xử lý. Pin yếu thì cắm sạc.';
+  const hot = '<b>Máy nóng?</b> Để máy nguội vài phút, tháo ốp lưng; máy nóng tự giảm tốc độ.';
+  const restart = '<b>Tắt camera rồi bật lại</b> (nút 📷). Vẫn chậm thì đóng hẳn Safari rồi mở lại trang.';
+
+  if (wait >= work) {
+    h += `<h4>Nguyên nhân chính: camera gửi hình chậm</h4>` +
+         `<p>App xử lý xong mỗi hình trong ${work.toFixed(0)} ms nhưng phải chờ camera tới ${wait.toFixed(0)} ms. ` +
+         `Camera báo ${camFps} hình/giây nhưng thực tế gửi ít hơn nhiều. Thường gặp nhất là <b>thiếu sáng</b>: ` +
+         `khi tối, iPhone tự kéo dài thời gian chụp mỗi hình.</p>`;
+    steps.push(torchStep,
+               '<b>Tránh ngược sáng:</b> đừng để cửa sổ hay đèn sáng ở phía sau vùng kim.',
+               lowPower, hot, restart);
+  } else {
+    h += `<h4>Nguyên nhân chính: máy xử lý chậm</h4>` +
+         `<p>Mỗi hình app cần ${work.toFixed(0)} ms để xử lý (đọc ảnh ${proc.ms[0].toFixed(0)} ms, ` +
+         `nhận diện kim ${proc.ms[1].toFixed(0)} ms) — quá chậm so với mức cần (dưới 40 ms).</p>`;
+    steps.push(lowPower,
+               '<b>Đóng các ứng dụng khác</b> và các tab Safari khác đang mở.',
+               '<b>Bấm VÙNG</b> khoanh hẹp quanh kim — app chỉ phải tìm trong vùng nhỏ.');
+    if (camMode === 'hd') steps.push('<b>Đổi sang chế độ 720p</b> trong ⚙ → Camera → Chế độ (ảnh nhỏ hơn, đọc nhanh hơn). ' +
+                                     'Đổi xong phải bấm HIỆU CHUẨN lại.');
+    steps.push(hot, restart);
+    if (!torchOn || !torchCap) steps.push(torchStep);
+  }
+  h += `<h4>Thử lần lượt từng bước</h4><ol>${steps.map(s => `<li>${s}</li>`).join('')}</ol>` +
+       `<p class="set-note">Bảng này tự cập nhật mỗi giây: làm xong một bước, chờ vài giây xem số khung/giây có tăng không.</p>` +
+       `<p class="set-note">Đã thử hết mà vẫn dưới 10 khung/giây: máy này không phù hợp để đo <b>tốc độ</b> châm ` +
+       `(độ sâu và góc vẫn đo được) — nên dùng điện thoại khác.</p>`;
+  return h;
+}
+function showDiag() {
+  const h = diagHtml();
+  if (diagBody.dataset.h !== h) { diagBody.innerHTML = h; diagBody.dataset.h = h; }   // không vẽ lại khi không đổi
+}
+function openDiag() { showDiag(); diagModal.style.display = 'flex'; }
+$('perf-pill').addEventListener('click', openDiag);
+$('btn-diag').addEventListener('click', () => { $('settings-modal').style.display = 'none'; openDiag(); });
+diagBody.addEventListener('click', e => { if (e.target.closest('[data-act="torch"]') && !torchOn) toggleTorch(); });
+
 const fmtMs = v => `${v.toFixed(0)} ms`;
 /** Bảng chi tiết kỹ thuật (popup), cập nhật mỗi giây khi camera chạy. */
 function showCamInfo() {
@@ -549,6 +655,7 @@ function countProcessed(now) {
     proc.n = 0; proc.t0 = now;
     perfTick(now);
     showCamInfo();
+    if (diagModal.style.display === 'flex') showDiag();
   }
 }
 
@@ -1562,6 +1669,7 @@ document.querySelectorAll('.modal').forEach(m => {
 
 // ── Khởi tạo ──────────────────────────────────────────────────────────────────
 (function init() {
+  showTorch();
   stuId.value  = practicing() ? session.id : store.get('mssv', '');
   tiltEl.value = geo.tiltDeg;
   $('cam-mode').value = camMode;
